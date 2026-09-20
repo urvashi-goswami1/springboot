@@ -1,0 +1,603 @@
+Practical No. 14
+Global Exception Handling using @ControllerAdvice and @ExceptionHandler
+Textbook Reference: Chapter 6 — Building RESTful Microservices
+Objective
+Centralize exception handling across all REST controllers using @ControllerAdvice, returning a
+consistent, structured error response (timestamp, message, status, path) instead of default Spring
+stack-trace pages. Built with Spring Boot, Spring Data JPA, Maven, and an embedded H2 database.
+Project Setup Summary
+Build tool: Maven | Framework: Spring Boot | Database: H2 (in-memory) | Base package:
+com.example.api
+This practical wires the shared GlobalExceptionHandler into both the Employee module (Practical 12,
+now given a proper Service layer so it has somewhere to throw from) and the Customer module (Practical 13,
+whose validation errors it now formats). Package layout: exception (shared),
+employee.{entity,dto,mapper,repository,service,controller},
+customer.{entity,repository,controller}.
+Step 3 says to throw ResourceNotFoundException from the service layer instead of returning null. Since the
+earlier practicals had the Employee controller call the repository directly, a thin EmployeeService /
+EmployeeServiceImpl is introduced here so the lookup-and-throw logic lives in the right layer, as the
+instructions require.
+1. Maven Configuration
+pom.xml (project root)
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+ xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+ xsi:schemaLocation="http://maven.apache.org/POM/4.0.0
+ https://maven.apache.org/xsd/maven-4.0.0.xsd">
+ <modelVersion>4.0.0</modelVersion>
+ <parent>
+ <groupId>org.springframework.boot</groupId>
+ <artifactId>spring-boot-starter-parent</artifactId>
+ <version>3.3.4</version>
+ <relativePath/>
+ </parent>
+ <groupId>com.example</groupId>
+ <artifactId>global-exception-api</artifactId>
+ <version>0.0.1-SNAPSHOT</version>
+ <name>global-exception-api</name>
+ <description>Practical 14 - Global Exception Handling (@ControllerAdvice)</description>
+ <properties>
+ <java.version>17</java.version>
+ </properties>
+ <dependencies>
+ <dependency>
+ <groupId>org.springframework.boot</groupId>
+ <artifactId>spring-boot-starter-web</artifactId>
+ </dependency>
+ <dependency>
+ <groupId>org.springframework.boot</groupId>
+ <artifactId>spring-boot-starter-data-jpa</artifactId>
+ </dependency>
+ <!-- H2 in-memory database -->
+ <dependency>
+ <groupId>com.h2database</groupId>
+ <artifactId>h2</artifactId>
+ <scope>runtime</scope>
+ </dependency>
+ <!-- Bean Validation (reused from Practical 13) -->
+ <dependency>
+ <groupId>org.springframework.boot</groupId>
+ <artifactId>spring-boot-starter-validation</artifactId>
+ </dependency>
+ <dependency>
+ <groupId>org.projectlombok</groupId>
+ <artifactId>lombok</artifactId>
+ <optional>true</optional>
+ </dependency>
+ <dependency>
+ <groupId>org.springframework.boot</groupId>
+ <artifactId>spring-boot-starter-test</artifactId>
+ <scope>test</scope>
+ </dependency>
+ </dependencies>
+ <build>
+ <plugins>
+ <plugin>
+ <groupId>org.springframework.boot</groupId>
+ <artifactId>spring-boot-maven-plugin</artifactId>
+ </plugin>
+ </plugins>
+ </build>
+</project>
+2. H2 Database Configuration
+src/main/resources/application.properties
+# ---- Server ----
+server.port=8080
+# ---- H2 Datasource (in-memory) ----
+spring.datasource.url=jdbc:h2:mem:apidb;DB_CLOSE_DELAY=-1
+spring.datasource.driverClassName=org.h2.Driver
+spring.datasource.username=sa
+spring.datasource.password=
+# ---- JPA / Hibernate ----
+spring.jpa.database-platform=org.hibernate.dialect.H2Dialect
+spring.jpa.hibernate.ddl-auto=update
+spring.jpa.show-sql=true
+spring.jpa.properties.hibernate.format_sql=true
+# ---- H2 Console ----
+spring.h2.console.enabled=true
+spring.h2.console.path=/h2-console
+# Access at: http://localhost:8080/h2-console
+# JDBC URL to use in the console: jdbc:h2:mem:apidb
+# ---- Suppress Spring's default error page details, our handler takes over ----
+server.error.include-message=never
+server.error.include-binding-errors=never
+3. Shared Exception Infrastructure
+3.1 ResourceNotFoundException.java
+src/main/java/com/example/api/exception/ResourceNotFoundException.java
+package com.example.api.exception;
+/**
+ * Thrown by any service layer when a lookup by id finds nothing,
+ * instead of returning null or letting a NullPointerException happen later.
+ */
+public class ResourceNotFoundException extends RuntimeException {
+ public ResourceNotFoundException(String message) {
+ super(message);
+ }
+}
+3.2 ErrorResponse.java
+src/main/java/com/example/api/exception/ErrorResponse.java
+package com.example.api.exception;
+import java.time.LocalDateTime;
+/**
+ * Consistent JSON shape returned for every handled error,
+ * instead of Spring's default stack-trace / whitelabel error page.
+ */
+public class ErrorResponse {
+ private LocalDateTime timestamp;
+ private String message;
+ private int status;
+ private String path;
+ public ErrorResponse() {
+ }
+ public ErrorResponse(LocalDateTime timestamp, String message, int status, String path) {
+ this.timestamp = timestamp;
+ this.message = message;
+ this.status = status;
+ this.path = path;
+ }
+ public LocalDateTime getTimestamp() {
+ return timestamp;
+ }
+ public void setTimestamp(LocalDateTime timestamp) {
+ this.timestamp = timestamp;
+ }
+ public String getMessage() {
+ return message;
+ }
+ public void setMessage(String message) {
+ this.message = message;
+ }
+ public int getStatus() {
+ return status;
+ }
+ public void setStatus(int status) {
+ this.status = status;
+ }
+ public String getPath() {
+ return path;
+ }
+ public void setPath(String path) {
+ this.path = path;
+ }
+}
+3.3 GlobalExceptionHandler.java
+One class, three handlers, applied to every @RestController in the application: 404 for missing
+resources, 400 with per-field messages for @Valid failures, and a 500 catch-all for anything else — so no
+endpoint can ever leak a raw stack trace.
+src/main/java/com/example/api/exception/GlobalExceptionHandler.java
+package com.example.api.exception;
+import jakarta.servlet.http.HttpServletRequest;
+import org.springframework.http.HttpStatus;
+import org.springframework.http.ResponseEntity;
+import org.springframework.validation.FieldError;
+import org.springframework.web.bind.MethodArgumentNotValidException;
+import org.springframework.web.bind.annotation.ControllerAdvice;
+import org.springframework.web.bind.annotation.ExceptionHandler;
+import java.time.LocalDateTime;
+import java.util.LinkedHashMap;
+import java.util.Map;
+import java.util.stream.Collectors;
+@ControllerAdvice
+public class GlobalExceptionHandler {
+ // ---- 404: resource not found ----
+ @ExceptionHandler(ResourceNotFoundException.class)
+ public ResponseEntity<ErrorResponse> handleNotFound(ResourceNotFoundException ex,
+ HttpServletRequest request) {
+ ErrorResponse error = new ErrorResponse(
+ LocalDateTime.now(),
+ ex.getMessage(),
+ HttpStatus.NOT_FOUND.value(),
+ request.getRequestURI()
+ );
+ return new ResponseEntity<>(error, HttpStatus.NOT_FOUND);
+ }
+ // ---- 400: @Valid failures (from Practical 13) ----
+ // Collects every field-level violation into one structured message,
+ // e.g. "name: must not be blank; email: must be a well-formed email address; age: must be greater t @ExceptionHandler(MethodArgumentNotValidException.class)
+ public ResponseEntity<ErrorResponse> handleValidation(MethodArgumentNotValidException ex,
+ HttpServletRequest request) {
+ Map<String, String> fieldErrors = new LinkedHashMap<>();
+ ex.getBindingResult().getFieldErrors().forEach(
+ (FieldError fe) -> fieldErrors.put(fe.getField(), fe.getDefaultMessage())
+ );
+ String combinedMessage = fieldErrors.entrySet().stream()
+ .map(e -> e.getKey() + ": " + e.getValue())
+ .collect(Collectors.joining("; "));
+ ErrorResponse error = new ErrorResponse(
+ LocalDateTime.now(),
+ combinedMessage,
+ HttpStatus.BAD_REQUEST.value(),
+ request.getRequestURI()
+ );
+ return new ResponseEntity<>(error, HttpStatus.BAD_REQUEST);
+ }
+ // ---- 500: catch-all for any other unhandled exception ----
+ @ExceptionHandler(Exception.class)
+ public ResponseEntity<ErrorResponse> handleGenericException(Exception ex,
+ HttpServletRequest request) {
+ ErrorResponse error = new ErrorResponse(
+ LocalDateTime.now(),
+ "An unexpected error occurred: " + ex.getMessage(),
+ HttpStatus.INTERNAL_SERVER_ERROR.value(),
+ request.getRequestURI()
+ );
+ return new ResponseEntity<>(error, HttpStatus.INTERNAL_SERVER_ERROR);
+ }
+}
+4. Employee Module — Refactored to Use the Handler
+4.1 Employee.java (entity, unchanged from Practical 12)
+src/main/java/com/example/api/employee/entity/Employee.java
+package com.example.api.employee.entity;
+import jakarta.persistence.*;
+import lombok.AllArgsConstructor;
+import lombok.Data;
+import lombok.NoArgsConstructor;
+@Entity
+@Table(name = "employees")
+@Data
+@NoArgsConstructor
+@AllArgsConstructor
+public class Employee {
+ @Id
+ @GeneratedValue(strategy = GenerationType.IDENTITY)
+ private int empId;
+ private String empName;
+ private String department;
+ private Double salary;
+ // Sensitive field - never exposed via the REST API (Practical 12)
+ private String password;
+}
+4.2 EmployeeDTO.java and EmployeeMapper.java (unchanged from Practical 12)
+src/main/java/com/example/api/employee/{dto,mapper}/...
+// dto/EmployeeDTO.java
+package com.example.api.employee.dto;
+import lombok.AllArgsConstructor;
+import lombok.Data;
+import lombok.NoArgsConstructor;
+@Data
+@NoArgsConstructor
+@AllArgsConstructor
+public class EmployeeDTO {
+ private int empId;
+ private String empName;
+ private String department;
+}
+// ---------------------------------------------------------------
+// mapper/EmployeeMapper.java
+package com.example.api.employee.mapper;
+import com.example.api.employee.dto.EmployeeDTO;
+import com.example.api.employee.entity.Employee;
+public class EmployeeMapper {
+ private EmployeeMapper() {
+ }
+ public static EmployeeDTO toDto(Employee e) {
+ if (e == null) return null;
+ EmployeeDTO dto = new EmployeeDTO();
+ dto.setEmpId(e.getEmpId());
+ dto.setEmpName(e.getEmpName());
+ dto.setDepartment(e.getDepartment());
+ return dto;
+ }
+ public static Employee toEntity(EmployeeDTO d) {
+ if (d == null) return null;
+ Employee employee = new Employee();
+ employee.setEmpId(d.getEmpId());
+ employee.setEmpName(d.getEmpName());
+ employee.setDepartment(d.getDepartment());
+ return employee;
+ }
+}
+
+4.3 EmployeeRepository.java
+src/main/java/com/example/api/employee/repository/EmployeeRepository.java
+package com.example.api.employee.repository;
+import com.example.api.employee.entity.Employee;
+import org.springframework.data.jpa.repository.JpaRepository;
+import org.springframework.stereotype.Repository;
+@Repository
+public interface EmployeeRepository extends JpaRepository<Employee, Integer> {
+}
+
+
+4.4 EmployeeService (new) — throws ResourceNotFoundException, not null
+src/main/java/com/example/api/employee/service/{EmployeeService,EmployeeServiceImpl
+}.java
+// service/EmployeeService.java
+package com.example.api.employee.service;
+import com.example.api.employee.entity.Employee;
+import java.util.List;
+public interface EmployeeService {
+ Employee create(Employee employee);
+ List<Employee> getAll();
+ Employee getById(int id);
+ Employee update(int id, Employee employee);
+ void delete(int id);
+}
+// ---------------------------------------------------------------
+// service/EmployeeServiceImpl.java
+package com.example.api.employee.service;
+import com.example.api.employee.entity.Employee;
+import com.example.api.employee.repository.EmployeeRepository;
+import com.example.api.exception.ResourceNotFoundException;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.stereotype.Service;
+import java.util.List;
+@Service
+public class EmployeeServiceImpl implements EmployeeService {
+ private final EmployeeRepository employeeRepository;
+ @Autowired
+ public EmployeeServiceImpl(EmployeeRepository employeeRepository) {
+ this.employeeRepository = employeeRepository;
+ }
+ @Override
+ public Employee create(Employee employee) {
+ return employeeRepository.save(employee);
+ }
+ @Override
+ public List<Employee> getAll() {
+ return employeeRepository.findAll();
+ }
+ @Override
+ public Employee getById(int id) {
+ // Step 3: throw instead of returning null
+ return employeeRepository.findById(id)
+ .orElseThrow(() -> new ResourceNotFoundException(
+ "Employee not found with id: " + id));
+ }
+ @Override
+ public Employee update(int id, Employee employee) {
+ Employee existing = employeeRepository.findById(id)
+ .orElseThrow(() -> new ResourceNotFoundException(
+ "Employee not found with id: " + id));
+ if (employee.getEmpName() != null) {
+ existing.setEmpName(employee.getEmpName());
+ }
+ if (employee.getDepartment() != null) {
+ existing.setDepartment(employee.getDepartment());
+ }
+ // password/salary preserved untouched (Practical 12 rule)
+ return employeeRepository.save(existing);
+ }
+ @Override
+ public void delete(int id) {
+ // Step 7: PUT/DELETE also route through ResourceNotFoundException,
+ // never a raw NullPointerException
+ if (!employeeRepository.existsById(id)) {
+ throw new ResourceNotFoundException("Employee not found with id: " + id);
+ }
+ employeeRepository.deleteById(id);
+ }
+}
+
+
+4.5 EmployeeRestController.java (now delegates to the service)
+src/main/java/com/example/api/employee/controller/EmployeeRestController.java
+package com.example.api.employee.controller;
+import com.example.api.employee.dto.EmployeeDTO;
+import com.example.api.employee.entity.Employee;
+import com.example.api.employee.mapper.EmployeeMapper;
+import com.example.api.employee.service.EmployeeService;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.http.HttpStatus;
+import org.springframework.http.ResponseEntity;
+import org.springframework.web.bind.annotation.*;
+import java.util.List;
+import java.util.stream.Collectors;
+@RestController
+@RequestMapping("/api/employees")
+public class EmployeeRestController {
+ private final EmployeeService employeeService;
+ @Autowired
+ public EmployeeRestController(EmployeeService employeeService) {
+ this.employeeService = employeeService;
+ }
+ @GetMapping
+ public ResponseEntity<List<EmployeeDTO>> getAll() {
+ List<EmployeeDTO> dtos = employeeService.getAll().stream()
+ .map(EmployeeMapper::toDto)
+ .collect(Collectors.toList());
+ return ResponseEntity.ok(dtos);
+ }
+ // Any non-existent id here now bubbles up ResourceNotFoundException
+ // from the service, caught by GlobalExceptionHandler -> 404 JSON.
+ @GetMapping("/{id}")
+ public ResponseEntity<EmployeeDTO> getById(@PathVariable int id) {
+ Employee employee = employeeService.getById(id);
+ return ResponseEntity.ok(EmployeeMapper.toDto(employee));
+ }
+ @PostMapping
+ public ResponseEntity<EmployeeDTO> create(@RequestBody EmployeeDTO dto) {
+ Employee saved = employeeService.create(EmployeeMapper.toEntity(dto));
+ return new ResponseEntity<>(EmployeeMapper.toDto(saved), HttpStatus.CREATED);
+ }
+ @PutMapping("/{id}")
+ public ResponseEntity<EmployeeDTO> update(@PathVariable int id, @RequestBody EmployeeDTO dto) {
+ Employee updated = employeeService.update(id, EmployeeMapper.toEntity(dto));
+ return ResponseEntity.ok(EmployeeMapper.toDto(updated));
+ }
+ @DeleteMapping("/{id}")
+ public ResponseEntity<Void> delete(@PathVariable int id) {
+ employeeService.delete(id);
+ return ResponseEntity.noContent().build();
+ }
+}
+
+5. Customer Module — Validation Errors Now Structured
+The Customer entity keeps its Practical 13 validation annotations unchanged. The controller is updated only
+to raise ResourceNotFoundException on a missing id, so it too flows through the same
+GlobalExceptionHandler; the @Valid-triggered MethodArgumentNotValidException is now
+caught globally, replacing the bare 400 from Practical 13 with a structured field-error message.
+
+
+5.1 Customer.java (entity, unchanged from Practical 13)
+src/main/java/com/example/api/customer/entity/Customer.java
+package com.example.api.customer.entity;
+import jakarta.persistence.*;
+import jakarta.validation.constraints.Email;
+import jakarta.validation.constraints.Min;
+import jakarta.validation.constraints.NotBlank;
+import lombok.AllArgsConstructor;
+import lombok.Data;
+import lombok.NoArgsConstructor;
+@Entity
+@Table(name = "customers")
+@Data
+@NoArgsConstructor
+@AllArgsConstructor
+public class Customer {
+ @Id
+ @GeneratedValue(strategy = GenerationType.IDENTITY)
+ private int customerId;
+ @NotBlank(message = "must not be blank")
+ private String name;
+ @Email(message = "must be a well-formed email address")
+ private String email;
+ @Min(value = 18, message = "must be greater than or equal to 18")
+ private int age;
+}
+
+5.2 CustomerRepository.java
+src/main/java/com/example/api/customer/repository/CustomerRepository.java
+package com.example.api.customer.repository;
+import com.example.api.customer.entity.Customer;
+import org.springframework.data.jpa.repository.JpaRepository;
+import org.springframework.stereotype.Repository;
+@Repository
+public interface CustomerRepository extends JpaRepository<Customer, Integer> {
+}
+
+5.3 CustomerRestController.java
+src/main/java/com/example/api/customer/controller/CustomerRestController.java
+package com.example.api.customer.controller;
+import com.example.api.customer.entity.Customer;
+import com.example.api.customer.repository.CustomerRepository;
+import com.example.api.exception.ResourceNotFoundException;
+import jakarta.validation.Valid;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.http.HttpStatus;
+import org.springframework.http.ResponseEntity;
+import org.springframework.web.bind.annotation.*;
+@RestController
+@RequestMapping("/api/customers")
+public class CustomerRestController {
+ private final CustomerRepository customerRepository;
+ @Autowired
+ public CustomerRestController(CustomerRepository customerRepository) {
+ this.customerRepository = customerRepository;
+ }
+ // @Valid failures now flow into GlobalExceptionHandler.handleValidation()
+ // instead of Spring's bare default 400.
+ @PostMapping
+ public ResponseEntity<Customer> create(@Valid @RequestBody Customer customer) {
+ Customer saved = customerRepository.save(customer);
+ return new ResponseEntity<>(saved, HttpStatus.CREATED);
+ }
+ @GetMapping("/{id}")
+ public ResponseEntity<Customer> getById(@PathVariable int id) {
+ Customer customer = customerRepository.findById(id)
+ .orElseThrow(() -> new ResourceNotFoundException(
+ "Customer not found with id: " + id));
+ return ResponseEntity.ok(customer);
+ }
+ @PutMapping("/{id}")
+ public ResponseEntity<Customer> update(@PathVariable int id,
+ @Valid @RequestBody Customer customer) {
+ Customer existing = customerRepository.findById(id)
+ .orElseThrow(() -> new ResourceNotFoundException(
+ "Customer not found with id: " + id));
+ existing.setName(customer.getName());
+ existing.setEmail(customer.getEmail());
+ existing.setAge(customer.getAge());
+ return ResponseEntity.ok(customerRepository.save(existing));
+ }
+ @DeleteMapping("/{id}")
+ public ResponseEntity<Void> delete(@PathVariable int id) {
+ if (!customerRepository.existsById(id)) {
+ throw new ResourceNotFoundException("Customer not found with id: " + id);
+ }
+ customerRepository.deleteById(id);
+ return ResponseEntity.noContent().build();
+ }
+}
+
+6. Application Entry Point
+src/main/java/com/example/api/GlobalExceptionApiApplication.java
+package com.example.api;
+import org.springframework.boot.SpringApplication;
+import org.springframework.boot.autoconfigure.SpringBootApplication;
+@SpringBootApplication
+public class GlobalExceptionApiApplication {
+ public static void main(String[] args) {
+ SpringApplication.run(GlobalExceptionApiApplication.class, args);
+ }
+}
+7. Example Structured Responses
+GET /api/employees/9999 -> 404 (handleNotFound)
+HTTP/1.1 404 Not Found
+Content-Type: application/json
+{
+ "timestamp": "2026-09-21T11:02:47.113",
+ "message": "Employee not found with id: 9999",
+ "status": 404,
+ "path": "/api/employees/9999"
+}
+POST /api/customers (invalid body) -> 400 (handleValidation)
+HTTP/1.1 400 Bad Request
+Content-Type: application/json
+{
+ "timestamp": "2026-09-21T11:03:15.902",
+ "message": "name: must not be blank; email: must be a well-formed email address; age: must be greater  "status": 400,
+ "path": "/api/customers"
+}
+Any unhandled exception -> 500 (handleGenericException)
+HTTP/1.1 500 Internal Server Error
+Content-Type: application/json
+{
+ "timestamp": "2026-09-21T11:05:02.447",
+ "message": "An unexpected error occurred: <exception detail>",
+ "status": 500,
+ "path": "/api/employees"
+}
+8. Postman API Testing
+Import these four requests into a Postman Collection named Global Exception Handling API (base URL
+http://localhost:8080), then re-test all four HTTP verbs against a non-existent Employee id as step 7
+requires.
+Method Endpoint Request Body / Params Expected Response
+GET /api/employees/9999 None 404 Not Found — JSON {
+timestamp, message, status,
+path }
+POST /api/customers { "name":"",
+"email":"bad-email",
+"age":15 }
+400 Bad Request — structured
+field-error JSON via
+ControllerAdvice
+PUT /api/employees/9999 { "empName":"Ghost"
+}
+404 Not Found — structured
+error, not a stack trace
+DELETE /api/employees/9999 None 404 Not Found — structured
+error via
+GlobalExceptionHandler
+Notes for Testing
+• Set header Content-Type: application/json for POST and PUT.
+• Also send GET /api/employees/9999 again after the PUT/DELETE tests to confirm all four verbs (GET,
+POST-style validation, PUT, DELETE) consistently return structured JSON — never a raw stack trace or
+Spring's whitelabel error page.
+• Re-run the invalid Customer payload from Practical 13 side by side with this practical's response to see the
+difference: the message field now lists every violated field/rule instead of an empty body.
+• To exercise the 500 handler, temporarily trigger an unexpected error (e.g. pass a non-numeric id in a path
+that expects int can produce a 400 from Spring's own binder; a true 500 is easiest to demonstrate by
+deliberately throwing a plain RuntimeException in a test endpoint) and confirm the same { timestamp,
+message, status, path } shape comes back with status 500.
+• Save all requests into the Postman Collection for reuse.
+How to Run
+1. Place the files in the package structure shown above.
+2. Run mvn spring-boot:run (or run GlobalExceptionApiApplication from an IDE).
+3. Employee endpoints: http://localhost:8080/api/employees. Customer endpoints:
+http://localhost:8080/api/customers.
+4. Open http://localhost:8080/h2-console and connect with JDBC URL jdbc:h2:mem:apidb,
+username sa, empty password.
+5. Execute the Postman requests: GET missing employee (404) → POST invalid customer (400) → PUT
+missing employee (404) → DELETE missing employee (404). Every response should be structured JSON,
+never an HTML stack trace.
