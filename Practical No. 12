@@ -1,0 +1,320 @@
+Practical No. 12
+DTO Pattern – Separating the Entity from the API Contract
+Textbook Reference: Chapter 6 — Building RESTful Microservices
+Objective
+Decouple the persistent JPA entity from the data actually exposed by the REST API using the Data Transfer
+Object (DTO) pattern — hiding sensitive/internal fields (here, password) and mapping between Entity and
+DTO. Built with Spring Boot, Spring Data JPA, Maven, and an embedded H2 database.
+Project Setup Summary
+Build tool: Maven | Framework: Spring Boot | Database: H2 (in-memory) | Base package:
+com.example.employeeapi
+Package layout: entity, dto, mapper, repository, controller.
+1. Maven Configuration
+pom.xml (project root)
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+ xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+ xsi:schemaLocation="http://maven.apache.org/POM/4.0.0
+ https://maven.apache.org/xsd/maven-4.0.0.xsd">
+ <modelVersion>4.0.0</modelVersion>
+ <parent>
+ <groupId>org.springframework.boot</groupId>
+ <artifactId>spring-boot-starter-parent</artifactId>
+ <version>3.3.4</version>
+ <relativePath/>
+ </parent>
+ <groupId>com.example</groupId>
+ <artifactId>employee-api</artifactId>
+ <version>0.0.1-SNAPSHOT</version>
+ <name>employee-api</name>
+ <description>Practical 12 - DTO Pattern (Entity vs API Contract)</description>
+ <properties>
+ <java.version>17</java.version>
+ </properties>
+ <dependencies>
+ <dependency>
+ <groupId>org.springframework.boot</groupId>
+ <artifactId>spring-boot-starter-web</artifactId>
+ </dependency>
+ <dependency>
+ <groupId>org.springframework.boot</groupId>
+ <artifactId>spring-boot-starter-data-jpa</artifactId>
+ </dependency>
+ <!-- H2 in-memory database -->
+ <dependency>
+ <groupId>com.h2database</groupId>
+ <artifactId>h2</artifactId>
+ <scope>runtime</scope>
+ </dependency>
+ <dependency>
+ <groupId>org.springframework.boot</groupId>
+ <artifactId>spring-boot-starter-validation</artifactId>
+ </dependency>
+ <dependency>
+ <groupId>org.projectlombok</groupId>
+ <artifactId>lombok</artifactId>
+ <optional>true</optional>
+ </dependency>
+ <dependency>
+ <groupId>org.springframework.boot</groupId>
+ <artifactId>spring-boot-starter-test</artifactId>
+ <scope>test</scope>
+ </dependency>
+ </dependencies>
+ <build>
+ <plugins>
+ <plugin>
+ <groupId>org.springframework.boot</groupId>
+ <artifactId>spring-boot-maven-plugin</artifactId>
+ </plugin>
+ </plugins>
+ </build>
+</project>
+2. H2 Database Configuration
+src/main/resources/application.properties
+# ---- Server ----
+server.port=8080
+# ---- H2 Datasource (in-memory) ----
+spring.datasource.url=jdbc:h2:mem:employeedb;DB_CLOSE_DELAY=-1
+spring.datasource.driverClassName=org.h2.Driver
+spring.datasource.username=sa
+spring.datasource.password=
+# ---- JPA / Hibernate ----
+spring.jpa.database-platform=org.hibernate.dialect.H2Dialect
+spring.jpa.hibernate.ddl-auto=update
+spring.jpa.show-sql=true
+spring.jpa.properties.hibernate.format_sql=true
+# ---- H2 Console ----
+spring.h2.console.enabled=true
+spring.h2.console.path=/h2-console
+# Access at: http://localhost:8080/h2-console
+# JDBC URL to use in the console: jdbc:h2:mem:employeedb
+# The 'password' column WILL be visible here - it only stays hidden from the REST API.
+3. Entity — Employee.java (with sensitive field)
+The entity keeps the full, persistent shape of the record, including password, which must never be serialized
+directly into an API response.
+src/main/java/com/example/employeeapi/entity/Employee.java
+package com.example.employeeapi.entity;
+import jakarta.persistence.*;
+import lombok.AllArgsConstructor;
+import lombok.Data;
+import lombok.NoArgsConstructor;
+@Entity
+@Table(name = "employees")
+@Data
+@NoArgsConstructor
+@AllArgsConstructor
+public class Employee {
+ @Id
+ @GeneratedValue(strategy = GenerationType.IDENTITY)
+ private int empId;
+ private String empName;
+ private String department;
+ private Double salary;
+ // Sensitive field - persisted, but NEVER exposed via the REST API.
+ private String password;
+}
+4. DTO — EmployeeDTO.java (safe subset)
+The DTO is the API contract: it deliberately excludes salary and password, so no matter what the
+controller does, those fields can never be serialized to the client.
+src/main/java/com/example/employeeapi/dto/EmployeeDTO.java
+package com.example.employeeapi.dto;
+import lombok.AllArgsConstructor;
+import lombok.Data;
+import lombok.NoArgsConstructor;
+/**
+ * The shape of an Employee as seen by API clients.
+ * Only fields safe to expose - no salary, no password.
+ */
+@Data
+@NoArgsConstructor
+@AllArgsConstructor
+public class EmployeeDTO {
+ private int empId;
+ private String empName;
+ private String department;
+}
+5. Mapper — EmployeeMapper.java
+src/main/java/com/example/employeeapi/mapper/EmployeeMapper.java
+package com.example.employeeapi.mapper;
+import com.example.employeeapi.dto.EmployeeDTO;
+import com.example.employeeapi.entity.Employee;
+/**
+ * Static utility for converting between the persistent Employee entity
+ * and the EmployeeDTO exposed by the REST API.
+ */
+public class EmployeeMapper {
+ private EmployeeMapper() {
+ // utility class - no instances
+ }
+ // Entity -> DTO : used whenever data leaves the server
+ public static EmployeeDTO toDto(Employee e) {
+ if (e == null) {
+ return null;
+ }
+ EmployeeDTO dto = new EmployeeDTO();
+ dto.setEmpId(e.getEmpId());
+ dto.setEmpName(e.getEmpName());
+ dto.setDepartment(e.getDepartment());
+ // salary and password are intentionally NOT copied
+ return dto;
+ }
+ // DTO -> Entity : used when creating a brand-new Employee.
+ // salary/password are left null - they are never supplied by clients.
+ public static Employee toEntity(EmployeeDTO d) {
+ if (d == null) {
+ return null;
+ }
+ Employee employee = new Employee();
+ employee.setEmpId(d.getEmpId());
+ employee.setEmpName(d.getEmpName());
+ employee.setDepartment(d.getDepartment());
+ return employee;
+ }
+}
+6. Repository Layer
+src/main/java/com/example/employeeapi/repository/EmployeeRepository.java
+package com.example.employeeapi.repository;
+import com.example.employeeapi.entity.Employee;
+import org.springframework.data.jpa.repository.JpaRepository;
+import org.springframework.stereotype.Repository;
+@Repository
+public interface EmployeeRepository extends JpaRepository<Employee, Integer> {
+}
+7. Controller — EmployeeRestController.java
+Every GET converts Employee → EmployeeDTO with EmployeeMapper.toDto() before returning.
+POST accepts an EmployeeDTO, maps it to a new entity, and saves. PUT fetches the existing entity,
+overwrites only empName/department from the incoming DTO, and leaves password (and salary)
+completely untouched.
+src/main/java/com/example/employeeapi/controller/EmployeeRestController.java
+package com.example.employeeapi.controller;
+import com.example.employeeapi.dto.EmployeeDTO;
+import com.example.employeeapi.entity.Employee;
+import com.example.employeeapi.mapper.EmployeeMapper;
+import com.example.employeeapi.repository.EmployeeRepository;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.http.HttpStatus;
+import org.springframework.http.ResponseEntity;
+import org.springframework.web.bind.annotation.*;
+import java.util.List;
+import java.util.NoSuchElementException;
+import java.util.stream.Collectors;
+@RestController
+@RequestMapping("/api/employees")
+public class EmployeeRestController {
+ private final EmployeeRepository employeeRepository;
+ @Autowired
+ public EmployeeRestController(EmployeeRepository employeeRepository) {
+ this.employeeRepository = employeeRepository;
+ }
+ // GET /api/employees -> list of EmployeeDTO (no password, no salary)
+ @GetMapping
+ public ResponseEntity<List<EmployeeDTO>> getAll() {
+ List<EmployeeDTO> dtos = employeeRepository.findAll().stream()
+ .map(EmployeeMapper::toDto)
+ .collect(Collectors.toList());
+ return ResponseEntity.ok(dtos);
+ }
+ // GET /api/employees/{id} -> single EmployeeDTO
+ @GetMapping("/{id}")
+ public ResponseEntity<EmployeeDTO> getById(@PathVariable int id) {
+ Employee employee = employeeRepository.findById(id)
+ .orElseThrow(() -> new NoSuchElementException(
+ "Employee not found with id: " + id));
+ return ResponseEntity.ok(EmployeeMapper.toDto(employee));
+ }
+ // POST /api/employees -> accepts EmployeeDTO, saves as Employee, returns EmployeeDTO
+ @PostMapping
+ public ResponseEntity<EmployeeDTO> create(@RequestBody EmployeeDTO dto) {
+ Employee employee = EmployeeMapper.toEntity(dto);
+ // password/salary are not part of the DTO, so they remain null until
+ // set through an internal/admin process - never through this endpoint.
+ Employee saved = employeeRepository.save(employee);
+ return new ResponseEntity<>(EmployeeMapper.toDto(saved), HttpStatus.CREATED);
+ }
+ // PUT /api/employees/{id} -> maps DTO fields onto the existing entity,
+ // preserving password (and salary) untouched
+ @PutMapping("/{id}")
+ public ResponseEntity<EmployeeDTO> update(@PathVariable int id,
+ @RequestBody EmployeeDTO dto) {
+ Employee existing = employeeRepository.findById(id)
+ .orElseThrow(() -> new NoSuchElementException(
+ "Employee not found with id: " + id));
+ // Only the DTO-visible fields are updated.
+ // existing.password and existing.salary are never reassigned here.
+ if (dto.getEmpName() != null) {
+ existing.setEmpName(dto.getEmpName());
+ }
+ if (dto.getDepartment() != null) {
+ existing.setDepartment(dto.getDepartment());
+ }
+ Employee updated = employeeRepository.save(existing);
+ return ResponseEntity.ok(EmployeeMapper.toDto(updated));
+ }
+ // DELETE /api/employees/{id}
+ @DeleteMapping("/{id}")
+ public ResponseEntity<Void> delete(@PathVariable int id) {
+ if (!employeeRepository.existsById(id)) {
+ throw new NoSuchElementException("Employee not found with id: " + id);
+ }
+ employeeRepository.deleteById(id);
+ return ResponseEntity.noContent().build(); // 204
+ }
+}
+8. Application Entry Point
+src/main/java/com/example/employeeapi/EmployeeApiApplication.java
+package com.example.employeeapi;
+import org.springframework.boot.SpringApplication;
+import org.springframework.boot.autoconfigure.SpringBootApplication;
+@SpringBootApplication
+public class EmployeeApiApplication {
+ public static void main(String[] args) {
+ SpringApplication.run(EmployeeApiApplication.class, args);
+ }
+}
+9. Why the DTO Pattern Matters Here
+• Entity — the full persistent shape (empId, empName, department, salary, password), used only
+inside the server.
+• DTO — the API contract (empId, empName, department), the only shape a client ever sees.
+• Mapper — the single, centralized place where the conversion happens, so no controller method can
+accidentally return an Employee (and leak password) by forgetting to map it.
+• Because the controller's return types are EmployeeDTO/List<EmployeeDTO> everywhere, Jackson has
+no password field to serialize in the first place — the leak is prevented structurally, not by an annotation like
+@JsonIgnore that could be missed.
+10. Postman API Testing
+Import these four requests into a Postman Collection named Employee DTO API (base URL
+http://localhost:8080).
+Method Endpoint Request Body / Params Expected Response
+POST /api/employees { "empName":"Ibrahim",
+"department":"Finance"
+}
+201 Created —
+EmployeeDTO returned
+(no password field)
+GET /api/employees None 200 OK — JSON contains
+empId, empName,
+department only; no
+password field
+PUT /api/employees/{id} { "empName":"Ibrahim
+Khan",
+"department":"Finance"
+}
+200 OK — updated
+EmployeeDTO; password
+remains untouched
+internally
+DELETE /api/employees/{id} None 204 No Content
+Notes for Testing
+• Set header Content-Type: application/json for POST and PUT.
+• After GET /api/employees, visually confirm in the Postman response body that the JSON objects contain
+only empId, empName, and department — no salary, no password.
+• Open the H2 console and inspect the EMPLOYEES table directly: the PASSWORD column exists in the
+database even though it never appears in any API response — this is the DTO pattern working as intended.
+• Save all four requests into the Postman Collection for reuse.
+How to Run
+1. Place the files in the package structure shown above.
+2. Run mvn spring-boot:run (or run EmployeeApiApplication from an IDE).
+3. The API is available at http://localhost:8080/api/employees.
+4. Open http://localhost:8080/h2-console and connect with JDBC URL
+jdbc:h2:mem:employeedb, username sa, empty password.
+5. Execute the Postman requests in order: POST → GET (confirm no password field) → PUT → DELETE.
