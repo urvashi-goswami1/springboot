@@ -1,0 +1,452 @@
+Practical No. 8
+Pagination and Sorting with Spring Data JPA — Spring Boot (Maven) + H2 Database
+Textbook Reference: Chapter 5 — Working with Spring Data JPA
+Objective: Implement server-side pagination and sorting over a large result set using Spring Data's Pageable / PageRequest
+abstraction (the PagingAndSortingRepository capability inherited by JpaRepository ), exposed through query parameters on a REST
+endpoint.
+Stack: Java 17, Spring Boot 3.3.4, Spring Web, Spring Data JPA, H2 (in-memory), Maven
+1. Theory in Brief
+Why pagination? Returning thousands of rows in one response wastes memory and bandwidth. Server-side pagination sends
+only one slice (page) at a time, and the database does the limiting with LIMIT ... OFFSET ... .
+Pageable — an interface describing which slice is wanted (page number, page size, sort order).
+PageRequest.of(page, size, sort) — the standard implementation used to build a Pageable .
+Sort.by(sortBy) — builds the ORDER BY clause; .ascending() / .descending() set the direction.
+Page<T> — the result: the slice itself plus metadata ( totalElements , totalPages , number , size , first , last ). Spring
+converts it to JSON automatically, so the method just returns it.
+Page numbering is zero-based: page=0 is the first page.
+2. Project Structure
+pagination-demo
+|-- pom.xml
+`-- src
+`-- main
+|-- java
+| `-- com
+| `-- example
+| `-- pagination
+| |-- PaginationDemoApplication.java
+| |-- entity
+| | `-- Product.java
+| |-- repository
+| | `-- ProductRepository.java
+| `-- controller
+| `-- ProductRestController.java
+`-- resources
+|-- application.properties
+`-- data.sql
+3. Maven Dependencies
+pom.xml
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+xsi:schemaLocation="http://maven.apache.org/POM/4.0.0
+https://maven.apache.org/xsd/maven-4.0.0.xsd">
+<modelVersion>4.0.0</modelVersion>
+<parent>
+<groupId>org.springframework.boot</groupId>
+<artifactId>spring-boot-starter-parent</artifactId>
+<version>3.3.4</version>
+<relativePath/>
+</parent>
+<groupId>com.example</groupId>
+<artifactId>pagination-demo</artifactId>
+<version>1.0.0</version>
+<name>pagination-demo</name>
+<description>Practical 8 - Pagination and Sorting with Spring Data JPA</description>
+<properties>
+<java.version>17</java.version>
+</properties>
+<dependencies>
+<!-- REST endpoints (@RestController, embedded Tomcat) -->
+<dependency>
+<groupId>org.springframework.boot</groupId>
+<artifactId>spring-boot-starter-web</artifactId>
+</dependency>
+<!-- Spring Data JPA: gives JpaRepository, Pageable, PageRequest, Sort -->
+<dependency>
+<groupId>org.springframework.boot</groupId>
+<artifactId>spring-boot-starter-data-jpa</artifactId>
+</dependency>
+<!-- Bean validation for @Valid on the POST body -->
+<dependency>
+<groupId>org.springframework.boot</groupId>
+<artifactId>spring-boot-starter-validation</artifactId>
+</dependency>
+<!-- In-memory H2 database -->
+<dependency>
+<groupId>com.h2database</groupId>
+<artifactId>h2</artifactId>
+<scope>runtime</scope>
+</dependency>
+<dependency>
+<groupId>org.springframework.boot</groupId>
+<artifactId>spring-boot-starter-test</artifactId>
+<scope>test</scope>
+</dependency>
+</dependencies>
+<build>
+<plugins>
+<plugin>
+<groupId>org.springframework.boot</groupId>
+<artifactId>spring-boot-maven-plugin</artifactId>
+</plugin>
+</plugins>
+</build>
+</project>
+4. Configuration (H2 Database)
+src/main/resources/application.properties
+spring.application.name=pagination-demo
+server.port=8080
+# ---------- H2 in-memory database ----------
+spring.datasource.url=jdbc:h2:mem:productdb;DB_CLOSE_DELAY=-1
+spring.datasource.driverClassName=org.h2.Driver
+spring.datasource.username=sa
+spring.datasource.password=
+# H2 web console -> http://localhost:8080/h2-console (JDBC URL: jdbc:h2:mem:productdb)
+spring.h2.console.enabled=true
+spring.h2.console.path=/h2-console
+# ---------- JPA / Hibernate ----------
+spring.jpa.hibernate.ddl-auto=create-drop
+spring.jpa.show-sql=true
+spring.jpa.properties.hibernate.format_sql=true
+# ---------- Seed data ----------
+# run data.sql AFTER Hibernate creates the tables
+spring.sql.init.mode=always
+spring.jpa.defer-datasource-initialization=true
+Important: spring.jpa.defer-datasource-initialization=true is required, otherwise data.sql runs before Hibernate creates the
+products table and the insert fails.
+5. Step 1 — Sample Data (20 records)
+src/main/resources/data.sql
+-- STEP 1: 20 sample products so that pagination is meaningful
+INSERT INTO products (product_name, category, price, quantity) VALUES
+('Laptop', 'Electronics', 65000.0, 12),
+('Smartphone', 'Electronics', 28000.0, 30),
+('Bluetooth Mouse', 'Accessories', 750.0, 80),
+('Mechanical Keyboard','Accessories',3200.0, 45),
+('LED Monitor', 'Electronics', 9500.0, 18),
+('Laser Printer', 'Electronics', 15500.0, 9),
+('USB Pen Drive', 'Storage', 650.0,120),
+('External HDD', 'Storage', 4500.0, 25),
+('SSD 500GB', 'Storage', 5200.0, 33),
+('Office Chair', 'Furniture', 7800.0, 14),
+('Study Table', 'Furniture', 5400.0, 10),
+('Table Lamp', 'Furniture', 990.0, 60),
+('Notebook Pack', 'Stationery', 320.0,200),
+('Gel Pen Box', 'Stationery', 180.0,250),
+('Whiteboard', 'Stationery', 2100.0, 16),
+('Headphones', 'Accessories', 2400.0, 55),
+('Webcam HD', 'Accessories', 1850.0, 40),
+('Router Dual Band','Networking', 3100.0, 22),
+('Network Switch', 'Networking', 4700.0, 11),
+('LAN Cable 10m', 'Networking', 450.0, 95);
+6. Main Application Class
+src/main/java/com/example/pagination/PaginationDemoApplication.java
+package com.example.pagination;
+import org.springframework.boot.SpringApplication;
+import org.springframework.boot.autoconfigure.SpringBootApplication;
+@SpringBootApplication
+public class PaginationDemoApplication {
+public static void main(String[] args) {
+SpringApplication.run(PaginationDemoApplication.class, args);
+}
+}
+7. Entity Class — Product
+src/main/java/com/example/pagination/entity/Product.java
+package com.example.pagination.entity;
+import jakarta.persistence.Column;
+import jakarta.persistence.Entity;
+import jakarta.persistence.GeneratedValue;
+import jakarta.persistence.GenerationType;
+import jakarta.persistence.Id;
+import jakarta.persistence.Table;
+import jakarta.validation.constraints.NotBlank;
+import jakarta.validation.constraints.PositiveOrZero;
+@Entity
+@Table(name = "products")
+public class Product {
+@Id
+@GeneratedValue(strategy = GenerationType.IDENTITY)
+private Long productId;
+@NotBlank(message = "productName is required")
+@Column(nullable = false, length = 100)
+private String productName;
+@NotBlank(message = "category is required")
+@Column(nullable = false, length = 60)
+private String category;
+@PositiveOrZero(message = "price cannot be negative")
+@Column(nullable = false)
+private Double price;
+@PositiveOrZero(message = "quantity cannot be negative")
+@Column(nullable = false)
+private Integer quantity;
+public Product() {
+// required by JPA
+}
+public Product(String productName, String category, Double price, Integer quantity) {
+this.productName = productName;
+this.category = category;
+this.price = price;
+this.quantity = quantity;
+}
+public Long getProductId() {
+return productId;
+}
+public void setProductId(Long productId) {
+this.productId = productId;
+}
+public String getProductName() {
+return productName;
+}
+public void setProductName(String productName) {
+this.productName = productName;
+}
+public String getCategory() {
+return category;
+}
+public void setCategory(String category) {
+this.category = category;
+}
+public Double getPrice() {
+return price;
+}
+public void setPrice(Double price) {
+this.price = price;
+}
+public Integer getQuantity() {
+return quantity;
+}
+public void setQuantity(Integer quantity) {
+this.quantity = quantity;
+}
+@Override
+public String toString() {
+return "Product{productId=" + productId
++ ", productName='" + productName + '\''
++ ", category='" + category + '\''
++ ", price=" + price
++ ", quantity=" + quantity + '}';
+}
+}
+8. Step 2 — ProductRepository
+src/main/java/com/example/pagination/repository/ProductRepository.java
+package com.example.pagination.repository;
+import com.example.pagination.entity.Product;
+import org.springframework.data.domain.Page;
+import org.springframework.data.domain.Pageable;
+import org.springframework.data.jpa.repository.JpaRepository;
+import org.springframework.stereotype.Repository;
+/**
+* JpaRepository already extends PagingAndSortingRepository, so
+* findAll(Pageable) is inherited - no method body needs to be written.
+*/
+@Repository
+public interface ProductRepository extends JpaRepository<Product, Long> {
+// Optional extra: paginated search restricted to one category.
+Page<Product> findByCategoryIgnoreCase(String category, Pageable pageable);
+}
+9. Steps 3–6 — ProductRestController
+src/main/java/com/example/pagination/controller/ProductRestController.java
+package com.example.pagination.controller;
+import com.example.pagination.entity.Product;
+import com.example.pagination.repository.ProductRepository;
+import jakarta.validation.Valid;
+import org.springframework.data.domain.Page;
+import org.springframework.data.domain.PageRequest;
+import org.springframework.data.domain.Pageable;
+import org.springframework.data.domain.Sort;
+import org.springframework.http.HttpStatus;
+import org.springframework.http.ResponseEntity;
+import org.springframework.web.bind.annotation.DeleteMapping;
+import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.PathVariable;
+import org.springframework.web.bind.annotation.PostMapping;
+import org.springframework.web.bind.annotation.PutMapping;
+import org.springframework.web.bind.annotation.RequestBody;
+import org.springframework.web.bind.annotation.RequestMapping;
+import org.springframework.web.bind.annotation.RequestParam;
+import org.springframework.web.bind.annotation.RestController;
+import org.springframework.web.server.ResponseStatusException;
+import java.net.URI;
+import java.util.List;
+@RestController
+@RequestMapping("/api/products")
+public class ProductRestController {
+private static final List<String> ALLOWED_SORT_FIELDS =
+List.of("productId", "productName", "category", "price", "quantity");
+private final ProductRepository productRepository;
+// Constructor injection
+public ProductRestController(ProductRepository productRepository) {
+this.productRepository = productRepository;
+}
+/**
+* STEP 3, 4, 5
+* GET /api/products/page?page=0&size=5&sortBy=price&direction=asc
+*
+* Spring serializes Page<Product> into JSON containing
+* content[], totalPages, totalElements, number, size, first, last.
+*/
+@GetMapping("/page")
+public Page<Product> getProducts(
+@RequestParam(defaultValue = "0") int page,
+@RequestParam(defaultValue = "5") int size,
+@RequestParam(defaultValue = "productId") String sortBy,
+@RequestParam(defaultValue = "asc") String direction) {
+validate(page, size, sortBy);
+Sort sort = direction.equalsIgnoreCase("desc")
+? Sort.by(sortBy).descending()
+: Sort.by(sortBy).ascending();
+Pageable pageable = PageRequest.of(page, size, sort);
+return productRepository.findAll(pageable);
+}
+/**
+* Bonus: paginate inside a single category.
+* GET /api/products/page/category?category=Electronics&page=0&size=5
+*/
+@GetMapping("/page/category")
+public Page<Product> getProductsByCategory(
+@RequestParam String category,
+@RequestParam(defaultValue = "0") int page,
+@RequestParam(defaultValue = "5") int size,
+@RequestParam(defaultValue = "price") String sortBy) {
+validate(page, size, sortBy);
+Pageable pageable = PageRequest.of(page, size, Sort.by(sortBy));
+return productRepository.findByCategoryIgnoreCase(category, pageable);
+}
+/** GET /api/products/{id} */
+@GetMapping("/{id}")
+public Product getProduct(@PathVariable Long id) {
+return productRepository.findById(id)
+.orElseThrow(() -> new ResponseStatusException(
+HttpStatus.NOT_FOUND, "Product " + id + " not found"));
+}
+/**
+* STEP 6 (a) - CREATE
+* POST /api/products -> 201 Created, totalElements increases by 1.
+*/
+@PostMapping
+public ResponseEntity<Product> createProduct(@Valid @RequestBody Product product) {
+product.setProductId(null); // let the DB generate the id
+Product saved = productRepository.save(product);
+return ResponseEntity
+.created(URI.create("/api/products/" + saved.getProductId()))
+.body(saved);
+}
+/**
+* STEP 6 (b) - UPDATE (partial)
+* PUT /api/products/{id} with body { "price": 8999 }
+* Only the fields present in the body are changed, so the record can be
+* re-sorted by the new price on the next page fetch.
+*/
+@PutMapping("/{id}")
+public ResponseEntity<Product> updateProduct(@PathVariable Long id,
+@RequestBody Product changes) {
+Product existing = productRepository.findById(id)
+.orElseThrow(() -> new ResponseStatusException(
+HttpStatus.NOT_FOUND, "Product " + id + " not found"));
+if (changes.getProductName() != null) {
+existing.setProductName(changes.getProductName());
+}
+if (changes.getCategory() != null) {
+existing.setCategory(changes.getCategory());
+}
+if (changes.getPrice() != null) {
+existing.setPrice(changes.getPrice());
+}
+if (changes.getQuantity() != null) {
+existing.setQuantity(changes.getQuantity());
+}
+return ResponseEntity.ok(productRepository.save(existing));
+}
+/**
+* STEP 6 (c) - DELETE
+* DELETE /api/products/{id} -> 204 No Content, totalElements decreases by 1.
+*/
+@DeleteMapping("/{id}")
+public ResponseEntity<Void> deleteProduct(@PathVariable Long id) {
+if (!productRepository.existsById(id)) {
+throw new ResponseStatusException(
+HttpStatus.NOT_FOUND, "Product " + id + " not found");
+}
+productRepository.deleteById(id);
+return ResponseEntity.noContent().build();
+}
+/** Guards against page < 0, size <= 0 and an unknown sort column. */
+private void validate(int page, int size, String sortBy) {
+if (page < 0) {
+throw new ResponseStatusException(
+HttpStatus.BAD_REQUEST, "page must be 0 or greater");
+}
+if (size < 1 || size > 100) {
+throw new ResponseStatusException(
+HttpStatus.BAD_REQUEST, "size must be between 1 and 100");
+}
+if (!ALLOWED_SORT_FIELDS.contains(sortBy)) {
+throw new ResponseStatusException(
+HttpStatus.BAD_REQUEST,
+"sortBy must be one of " + ALLOWED_SORT_FIELDS);
+}
+}
+}
+10. Step 7 — Postman API Testing
+Method Endpoint Request Body / Params Expected Response
+GET /api/products/page?page=0&size=5&sortBy
+=price
+None 200 OK - content[] of 5 cheapest products, totalPages 4,
+totalElements 20, number 0, size 5
+GET /api/products/page?page=1&size=5&sortBy
+=productName
+None 200 OK - second page sorted alphabetically by productName
+GET /api/products/page?page=0&size=5&sortBy
+=price&direction=desc
+None 200 OK - most expensive products first
+POST /api/products { "productName":"Monitor", "category"
+:"Electronics", "price":9500, "quanti
+ty":8 }
+201 Created - totalElements becomes 21 on the next page
+fetch
+PUT /api/products/{id} { "price":8999 } 200 OK - updated price, record moves position when resorted by price
+DELETE /api/products/{id} None 204 No Content - totalElements decreases by 1
+GET /api/products/page?page=0&size=5&sortBy
+=colour
+None 400 Bad Request - sortBy must be one of the allowed
+columns
+Base URL: http://localhost:8080 . For POST and PUT set the header Content-Type: application/json and choose Body → raw →
+JSON in Postman.
+11. Sample Response
+GET http://localhost:8080/api/products/page?page=0&size=5&sortBy=price
+{
+"content": [
+{ "productId": 14, "productName": "Gel Pen Box", "category": "Stationery", "price": 180.0, "quantity": 250 },
+{ "productId": 13, "productName": "Notebook Pack", "category": "Stationery", "price": 320.0, "quantity": 200 },
+{ "productId": 20, "productName": "LAN Cable 10m", "category": "Networking", "price": 450.0, "quantity": 95 },
+{ "productId": 7, "productName": "USB Pen Drive", "category": "Storage", "price": 650.0, "quantity": 120 },
+{ "productId": 3, "productName": "Bluetooth Mouse","category": "Accessories","price": 750.0, "quantity": 80 }
+],
+"pageable": { "pageNumber": 0, "pageSize": 5, "sort": { "sorted": true, "unsorted": false } },
+"totalElements": 20,
+"totalPages": 4,
+"number": 0,
+"size": 5,
+"first": true,
+"last": false,
+"numberOfElements": 5,
+"empty": false
+}
+12. How to Run
+1. Create the folder structure shown in section 2 and copy each file into place.
+2. From the project root run mvn clean spring-boot:run (or run the main class from the IDE).
+3. Wait for Tomcat started on port 8080 in the console.
+4. Open http://localhost:8080/h2-console (JDBC URL jdbc:h2:mem:productdb , user sa , blank password) and run SELECT * FROM
+PRODUCTS; to confirm the 20 rows loaded.
+5. Fire the requests from section 10 in Postman.
+13. Observations
+With 20 records and size=5 , totalPages = 4 and totalElements = 20.
+After the POST, totalElements becomes 21 and totalPages becomes 5 ( totalPages = ceil(totalElements / size) ).
+After the PUT lowering the price to 8999, the record shifts to an earlier position when sorted by price.
+After the DELETE, totalElements drops back by one and the last page shrinks.
+Requesting a page beyond the last one returns 200 OK with an empty content[] , not an error.
+Console SQL confirms Hibernate issues one LIMIT/OFFSET query for the slice plus one COUNT(*) query for totalElements .
+14. Conclusion
+Server-side pagination and sorting were implemented with Spring Data JPA. By accepting page , size and sortBy as request
+parameters, building a Pageable with PageRequest.of(...) and returning Page<Product> from findAll(Pageable) , the API returns
+only the requested slice together with the paging metadata, and the metadata stays consistent across create, update and delete
+operations.
