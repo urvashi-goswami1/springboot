@@ -1,0 +1,399 @@
+Practical No. 17 - Role-Based Access Control (RBAC) with Spring Security Page 1
+Practical No. 17
+Role-Based Access Control (RBAC) with Spring Security
+Spring Boot 3 + Maven + H2 Database + Spring Data JPA + Spring Security
+Objective
+To extend the Spring Security configuration for role-based authorization: users are stored in H2 with
+BCrypt-encoded passwords and roles ADMIN or USER, and endpoints are restricted with method-level
+security (@EnableMethodSecurity + @PreAuthorize).
+Project Structure
+rbac-demo/
+ |-- pom.xml
+ `-- src/main/
+ |-- java/com/example/rbac/
+ | |-- RbacDemoApplication.java (seeds users + one admin item)
+ | |-- config/SecurityConfig.java (@EnableMethodSecurity)
+ | |-- model/AppUser.java
+ | |-- model/AdminItem.java
+ | |-- repository/AppUserRepository.java
+ | |-- repository/AdminItemRepository.java
+ | |-- service/CustomUserDetailsService.java
+ | `-- controller/
+ | |-- AdminController.java (ADMIN only)
+ | `-- UserController.java (ADMIN or USER)
+ `-- resources/application.properties
+pom.xml (Maven)
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+ xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+ xsi:schemaLocation="http://maven.apache.org/POM/4.0.0
+ https://maven.apache.org/xsd/maven-4.0.0.xsd">
+ <modelVersion>4.0.0</modelVersion>
+ <parent>
+ <groupId>org.springframework.boot</groupId>
+ <artifactId>spring-boot-starter-parent</artifactId>
+ <version>3.3.5</version>
+ <relativePath/>
+ </parent>
+ <groupId>com.example</groupId>
+ <artifactId>rbac-demo</artifactId>
+ <version>0.0.1-SNAPSHOT</version>
+ <name>rbac-demo</name>
+ <properties>
+ <java.version>17</java.version>
+ </properties>
+ <dependencies>
+ <dependency>
+ <groupId>org.springframework.boot</groupId>
+ <artifactId>spring-boot-starter-web</artifactId>
+ </dependency>
+ <dependency>
+ <groupId>org.springframework.boot</groupId>
+ <artifactId>spring-boot-starter-security</artifactId>
+ </dependency>
+ <dependency>
+ <groupId>org.springframework.boot</groupId>
+ <artifactId>spring-boot-starter-data-jpa</artifactId>
+ </dependency>
+ <dependency>
+Practical No. 17 - Role-Based Access Control (RBAC) with Spring Security Page 2
+ <groupId>com.h2database</groupId>
+ <artifactId>h2</artifactId>
+ <scope>runtime</scope>
+ </dependency>
+ <dependency>
+ <groupId>org.springframework.boot</groupId>
+ <artifactId>spring-boot-starter-test</artifactId>
+ <scope>test</scope>
+ </dependency>
+ </dependencies>
+ <build>
+ <plugins>
+ <plugin>
+ <groupId>org.springframework.boot</groupId>
+ <artifactId>spring-boot-maven-plugin</artifactId>
+ </plugin>
+ </plugins>
+ </build>
+</project>
+application.properties
+spring.application.name=rbac-demo
+# H2 in-memory database
+spring.datasource.url=jdbc:h2:mem:rbacdb
+spring.datasource.driver-class-name=org.h2.Driver
+spring.datasource.username=sa
+spring.datasource.password=
+# JPA / Hibernate
+spring.jpa.hibernate.ddl-auto=create-drop
+spring.jpa.show-sql=true
+spring.jpa.database-platform=org.hibernate.dialect.H2Dialect
+# H2 web console -> http://localhost:8080/h2-console
+spring.h2.console.enabled=true
+spring.h2.console.path=/h2-console
+Step 1: RbacDemoApplication.java (seeds one ADMIN, one USER and one admin
+item)
+package com.example.rbac;
+import com.example.rbac.model.AdminItem;
+import com.example.rbac.model.AppUser;
+import com.example.rbac.repository.AdminItemRepository;
+import com.example.rbac.repository.AppUserRepository;
+import org.springframework.boot.CommandLineRunner;
+import org.springframework.boot.SpringApplication;
+import org.springframework.boot.autoconfigure.SpringBootApplication;
+import org.springframework.context.annotation.Bean;
+import org.springframework.security.crypto.password.PasswordEncoder;
+@SpringBootApplication
+public class RbacDemoApplication {
+ public static void main(String[] args) {
+ SpringApplication.run(RbacDemoApplication.class, args);
+ }
+ @Bean
+ CommandLineRunner seedData(AppUserRepository users, AdminItemRepository items,
+ PasswordEncoder encoder) {
+ return args -> {
+ // roles are stored WITHOUT the ROLE_ prefix (added by .roles() later)
+ users.save(new AppUser("admin", encoder.encode("admin123"), "ADMIN"));
+ users.save(new AppUser("user", encoder.encode("user123"), "USER"));
+ // so that PUT / DELETE on /api/admin/data/1 can be tested straight away
+ items.save(new AdminItem("Initial Policy"));
+Practical No. 17 - Role-Based Access Control (RBAC) with Spring Security Page 3
+ };
+ }
+}
+model/AppUser.java
+package com.example.rbac.model;
+import com.fasterxml.jackson.annotation.JsonProperty;
+import jakarta.persistence.Column;
+import jakarta.persistence.Entity;
+import jakarta.persistence.GeneratedValue;
+import jakarta.persistence.GenerationType;
+import jakarta.persistence.Id;
+@Entity
+public class AppUser {
+ @Id
+ @GeneratedValue(strategy = GenerationType.IDENTITY)
+ private int userId;
+ @Column(unique = true, nullable = false)
+ private String username;
+ @JsonProperty(access = JsonProperty.Access.WRITE_ONLY)
+ @Column(nullable = false)
+ private String password; // BCrypt hash
+ private String role; // ADMIN or USER
+ public AppUser() { }
+ public AppUser(String username, String password, String role) {
+ this.username = username;
+ this.password = password;
+ this.role = role;
+ }
+ public int getUserId() { return userId; }
+ public void setUserId(int userId) { this.userId = userId; }
+ public String getUsername() { return username; }
+ public void setUsername(String username) { this.username = username; }
+ public String getPassword() { return password; }
+ public void setPassword(String password) { this.password = password; }
+ public String getRole() { return role; }
+ public void setRole(String role) { this.role = role; }
+}
+model/AdminItem.java (the admin-only resource, stored in H2)
+package com.example.rbac.model;
+import jakarta.persistence.Entity;
+import jakarta.persistence.GeneratedValue;
+import jakarta.persistence.GenerationType;
+import jakarta.persistence.Id;
+@Entity
+public class AdminItem {
+ @Id
+ @GeneratedValue(strategy = GenerationType.IDENTITY)
+ private Long id;
+ private String label;
+ public AdminItem() { }
+ public AdminItem(String label) {
+ this.label = label;
+ }
+Practical No. 17 - Role-Based Access Control (RBAC) with Spring Security Page 4
+ public Long getId() { return id; }
+ public void setId(Long id) { this.id = id; }
+ public String getLabel() { return label; }
+ public void setLabel(String label) { this.label = label; }
+}
+repository/AppUserRepository.java and repository/AdminItemRepository.java
+package com.example.rbac.repository;
+import com.example.rbac.model.AppUser;
+import java.util.Optional;
+import org.springframework.data.jpa.repository.JpaRepository;
+public interface AppUserRepository extends JpaRepository<AppUser, Integer> {
+ Optional<AppUser> findByUsername(String username);
+}
+// ---------------------------------------------------------------------
+package com.example.rbac.repository;
+import com.example.rbac.model.AdminItem;
+import org.springframework.data.jpa.repository.JpaRepository;
+public interface AdminItemRepository extends JpaRepository<AdminItem, Long> {
+}
+service/CustomUserDetailsService.java
+package com.example.rbac.service;
+import com.example.rbac.model.AppUser;
+import com.example.rbac.repository.AppUserRepository;
+import org.springframework.security.core.userdetails.User;
+import org.springframework.security.core.userdetails.UserDetails;
+import org.springframework.security.core.userdetails.UserDetailsService;
+import org.springframework.security.core.userdetails.UsernameNotFoundException;
+import org.springframework.stereotype.Service;
+@Service
+public class CustomUserDetailsService implements UserDetailsService {
+ private final AppUserRepository appUserRepository;
+ public CustomUserDetailsService(AppUserRepository appUserRepository) {
+ this.appUserRepository = appUserRepository;
+ }
+ @Override
+ public UserDetails loadUserByUsername(String username)
+ throws UsernameNotFoundException {
+ AppUser appUser = appUserRepository.findByUsername(username)
+ .orElseThrow(() ->
+ new UsernameNotFoundException("User not found: " + username));
+ return User.withUsername(appUser.getUsername())
+ .password(appUser.getPassword())
+ .roles(appUser.getRole()) // ADMIN -> authority ROLE_ADMIN
+ .build();
+ }
+}
+Step 2: config/SecurityConfig.java (@EnableMethodSecurity)
+package com.example.rbac.config;
+import com.example.rbac.service.CustomUserDetailsService;
+import org.springframework.boot.autoconfigure.security.servlet.PathRequest;
+import org.springframework.context.annotation.Bean;
+import org.springframework.context.annotation.Configuration;
+import org.springframework.security.authentication.AuthenticationProvider;
+import org.springframework.security.authentication.dao.DaoAuthenticationProvider;
+Practical No. 17 - Role-Based Access Control (RBAC) with Spring Security Page 5
+import org.springframework.security.config.Customizer;
+import org.springframework.security.config.annotation.method.configuration.EnableMethodSecurity;
+import org.springframework.security.config.annotation.web.builders.HttpSecurity;
+import org.springframework.security.config.annotation.web.configuration.EnableWebSecurity;
+import org.springframework.security.config.http.SessionCreationPolicy;
+import org.springframework.security.crypto.bcrypt.BCryptPasswordEncoder;
+import org.springframework.security.crypto.password.PasswordEncoder;
+import org.springframework.security.web.SecurityFilterChain;
+@Configuration
+@EnableWebSecurity
+@EnableMethodSecurity // enables @PreAuthorize / @PostAuthorize
+public class SecurityConfig {
+ @Bean
+ public PasswordEncoder passwordEncoder() {
+ return new BCryptPasswordEncoder();
+ }
+ @Bean
+ public AuthenticationProvider authenticationProvider(
+ CustomUserDetailsService userDetailsService, PasswordEncoder passwordEncoder) {
+ DaoAuthenticationProvider provider = new DaoAuthenticationProvider();
+ provider.setUserDetailsService(userDetailsService);
+ provider.setPasswordEncoder(passwordEncoder);
+ return provider;
+ }
+ @Bean
+ public SecurityFilterChain filterChain(HttpSecurity http,
+ AuthenticationProvider authenticationProvider)
+ throws Exception {
+ http
+ .csrf(csrf -> csrf.disable()) // stateless REST API + Basic Auth
+ .sessionManagement(s -> s.sessionCreationPolicy(SessionCreationPolicy.STATELESS))
+ .authenticationProvider(authenticationProvider)
+ .authorizeHttpRequests(auth -> auth
+ .requestMatchers(PathRequest.toH2Console()).permitAll() // dev only
+ // URL rule only checks "logged in"; the ROLE check is done by @PreAuthorize
+ .anyRequest().authenticated()
+ )
+ .httpBasic(Customizer.withDefaults())
+ .headers(h -> h.frameOptions(f -> f.sameOrigin())); // for H2 console frames
+ return http.build();
+ }
+}
+Steps 3 and 5: controller/AdminController.java (ADMIN only)
+package com.example.rbac.controller;
+import com.example.rbac.model.AdminItem;
+import com.example.rbac.repository.AdminItemRepository;
+import java.util.List;
+import org.springframework.http.HttpStatus;
+import org.springframework.http.ResponseEntity;
+import org.springframework.security.access.prepost.PreAuthorize;
+import org.springframework.web.bind.annotation.*;
+@RestController
+@RequestMapping("/api/admin/data")
+public class AdminController {
+ private final AdminItemRepository repository;
+ public AdminController(AdminItemRepository repository) {
+ this.repository = repository;
+ }
+ // GET /api/admin/data -> 200 OK (ADMIN) / 403 (USER)
+ @GetMapping
+ @PreAuthorize("hasRole('ADMIN')")
+ public List<AdminItem> getAdminData() {
+Practical No. 17 - Role-Based Access Control (RBAC) with Spring Security Page 6
+ return repository.findAll();
+ }
+ // POST /api/admin/data -> 201 Created (ADMIN) / 403 (USER)
+ @PostMapping
+ @PreAuthorize("hasRole('ADMIN')")
+ public ResponseEntity<AdminItem> create(@RequestBody AdminItem item) {
+ item.setId(null); // force INSERT
+ AdminItem saved = repository.save(item);
+ return ResponseEntity.status(HttpStatus.CREATED).body(saved);
+ }
+ // PUT /api/admin/data/{id} -> 200 OK (ADMIN) / 403 (USER) / 404 if id not found
+ @PutMapping("/{id}")
+ @PreAuthorize("hasRole('ADMIN')")
+ public ResponseEntity<AdminItem> update(@PathVariable Long id,
+ @RequestBody AdminItem updated) {
+ return repository.findById(id)
+ .map(existing -> {
+ existing.setLabel(updated.getLabel());
+ return ResponseEntity.ok(repository.save(existing));
+ })
+ .orElse(ResponseEntity.notFound().build());
+ }
+ // DELETE /api/admin/data/{id} -> 204 No Content (ADMIN) / 403 (USER) / 404
+ @DeleteMapping("/{id}")
+ @PreAuthorize("hasRole('ADMIN')")
+ public ResponseEntity<Void> delete(@PathVariable Long id) {
+ if (!repository.existsById(id)) {
+ return ResponseEntity.notFound().build();
+ }
+ repository.deleteById(id);
+ return ResponseEntity.noContent().build();
+ }
+}
+Step 4: controller/UserController.java (ADMIN or USER)
+package com.example.rbac.controller;
+import java.util.Map;
+import org.springframework.security.access.prepost.PreAuthorize;
+import org.springframework.security.core.Authentication;
+import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.RequestMapping;
+import org.springframework.web.bind.annotation.RestController;
+@RestController
+@RequestMapping("/api/user")
+public class UserController {
+ // GET /api/user/data -> 200 OK for both ADMIN and USER
+ @GetMapping("/data")
+ @PreAuthorize("hasAnyRole('ADMIN','USER')")
+ public Map<String, Object> getUserData(Authentication authentication) {
+ return Map.of("message", "Data available to ADMIN and USER",
+ "loggedInUser", authentication.getName(),
+ "authorities", authentication.getAuthorities().toString());
+ }
+}
+Run the Application
+cd rbac-demo
+mvn clean spring-boot:run
+# Server: http://localhost:8080
+# Seeded users: admin / admin123 (ROLE_ADMIN) user / user123 (ROLE_USER)
+Steps 6 and 7: Postman API Testing
+Practical No. 17 - Role-Based Access Control (RBAC) with Spring Security Page 7
+Use Authorization tab -> Type: Basic Auth. Credentials: admin / admin123 (ROLE_ADMIN) and user /
+user123 (ROLE_USER). For POST/PUT set Body -> raw -> JSON.
+# Method Endpoint Auth / Body Expected Response
+1 GET /api/admin/data No auth 401 Unauthorized
+2 GET /api/admin/data Basic Auth: user / user123 (ROLE_USER) 403 Forbidden
+3 GET /api/admin/data Basic Auth: admin / admin123
+(ROLE_ADMIN)
+200 OK
+4 POST /api/admin/data user / user123 + {"label":"Policy Update"} 403 Forbidden
+5 POST /api/admin/data admin / admin123 + {"label":"Policy Update"} 201 Created - ADMIN only
+6 PUT /api/admin/data/1 user / user123 + {"label":"Policy Update v2"} 403 Forbidden
+7 PUT /api/admin/data/1 admin / admin123 + {"label":"Policy Update
+v2"}
+200 OK - ADMIN only
+8 DELETE /api/admin/data/1 user / user123 403 Forbidden
+9 DELETE /api/admin/data/1 admin / admin123 204 No Content - ADMIN only
+10 GET /api/user/data user / user123 (ROLE_USER) 200 OK
+11 GET /api/user/data admin / admin123 (ROLE_ADMIN) 200 OK
+12 GET /api/user/data admin / wrongPass 401 Unauthorized
+Run the USER request before the ADMIN request for each verb (rows 8 then 9 for DELETE), so the 403 is
+shown while item 1 still exists.
+Sample cURL Commands (optional cross-check)
+curl -i -u user:user123 http://localhost:8080/api/admin/data # 403
+curl -i -u admin:admin123 http://localhost:8080/api/admin/data # 200
+curl -i -u admin:admin123 -X POST http://localhost:8080/api/admin/data \
+ -H "Content-Type: application/json" -d '{"label":"Policy Update"}' # 201
+curl -i -u admin:admin123 -X PUT http://localhost:8080/api/admin/data/1 \
+ -H "Content-Type: application/json" -d '{"label":"Policy Update v2"}' # 200
+curl -i -u user:user123 -X DELETE http://localhost:8080/api/admin/data/1 # 403
+curl -i -u admin:admin123 -X DELETE http://localhost:8080/api/admin/data/1 # 204
+curl -i -u user:user123 http://localhost:8080/api/user/data # 200
+Key Points to Remember
+• 401 vs 403: 401 = not authenticated (no or wrong credentials); 403 = authenticated but the role is not
+allowed. USER calling an ADMIN endpoint gets 403.
+• hasRole('ADMIN') automatically checks the authority ROLE_ADMIN. Do not write ROLE_ inside
+hasRole(); use hasAuthority('ROLE_ADMIN') if you want the full name.
+• @EnableMethodSecurity (Spring Security 6) replaces the older @EnableGlobalMethodSecurity and
+turns on @PreAuthorize. It works through Spring proxies, so it applies to methods of Spring beans
+called from outside.
+• Alternative (URL-based): .requestMatchers("/api/admin/**").hasRole("ADMIN") inside
+the SecurityFilterChain gives the same result without annotations.
+• Store roles without the ROLE_ prefix (ADMIN, USER); .roles() adds it.
+• H2 in-memory: the seeded users and items are recreated on every restart.
+Conclusion
+Role-based access control was implemented with database-backed users (ADMIN and USER) and
+method-level security. The /api/admin/data endpoints for GET, POST, PUT and DELETE are restricted to
+Practical No. 17 - Role-Based Access Control (RBAC) with Spring Security Page 8
+ADMIN (403 for USER), while /api/user/data is available to both r
