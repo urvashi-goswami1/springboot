@@ -1,0 +1,380 @@
+Practical No. 16 - User Registration and Login with BCrypt Page 1
+Practical No. 16
+User Registration and Login with BCrypt Password Encoding
+Spring Boot 3 + Maven + H2 Database + Spring Data JPA + Spring Security
+Objective
+To implement a database-backed user registration and login mechanism, storing passwords securely with
+BCryptPasswordEncoder instead of plain text, and authenticating against the database through a custom
+UserDetailsService and a DaoAuthenticationProvider.
+Project Structure
+user-auth-demo/
+ |-- pom.xml
+ `-- src/main/
+ |-- java/com/example/userauth/
+ | |-- UserAuthDemoApplication.java
+ | |-- config/SecurityConfig.java
+ | |-- model/AppUser.java
+ | |-- repository/AppUserRepository.java
+ | |-- service/CustomUserDetailsService.java
+ | `-- controller/
+ | |-- AuthController.java
+ | `-- SecureController.java
+ `-- resources/application.properties
+pom.xml (Maven)
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+ xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+ xsi:schemaLocation="http://maven.apache.org/POM/4.0.0
+ https://maven.apache.org/xsd/maven-4.0.0.xsd">
+ <modelVersion>4.0.0</modelVersion>
+ <parent>
+ <groupId>org.springframework.boot</groupId>
+ <artifactId>spring-boot-starter-parent</artifactId>
+ <version>3.3.5</version>
+ <relativePath/>
+ </parent>
+ <groupId>com.example</groupId>
+ <artifactId>user-auth-demo</artifactId>
+ <version>0.0.1-SNAPSHOT</version>
+ <name>user-auth-demo</name>
+ <properties>
+ <java.version>17</java.version>
+ </properties>
+ <dependencies>
+ <dependency>
+ <groupId>org.springframework.boot</groupId>
+ <artifactId>spring-boot-starter-web</artifactId>
+ </dependency>
+ <dependency>
+ <groupId>org.springframework.boot</groupId>
+ <artifactId>spring-boot-starter-security</artifactId>
+ </dependency>
+ <dependency>
+ <groupId>org.springframework.boot</groupId>
+ <artifactId>spring-boot-starter-data-jpa</artifactId>
+ </dependency>
+ <dependency>
+ <groupId>com.h2database</groupId>
+ <artifactId>h2</artifactId>
+Practical No. 16 - User Registration and Login with BCrypt Page 2
+ <scope>runtime</scope>
+ </dependency>
+ <dependency>
+ <groupId>org.springframework.boot</groupId>
+ <artifactId>spring-boot-starter-test</artifactId>
+ <scope>test</scope>
+ </dependency>
+ </dependencies>
+ <build>
+ <plugins>
+ <plugin>
+ <groupId>org.springframework.boot</groupId>
+ <artifactId>spring-boot-maven-plugin</artifactId>
+ </plugin>
+ </plugins>
+ </build>
+</project>
+application.properties
+spring.application.name=user-auth-demo
+# H2 in-memory database (data is lost when the application stops)
+spring.datasource.url=jdbc:h2:mem:userdb
+spring.datasource.driver-class-name=org.h2.Driver
+spring.datasource.username=sa
+spring.datasource.password=
+# JPA / Hibernate
+spring.jpa.hibernate.ddl-auto=create-drop
+spring.jpa.show-sql=true
+spring.jpa.database-platform=org.hibernate.dialect.H2Dialect
+# H2 web console -> http://localhost:8080/h2-console
+spring.h2.console.enabled=true
+spring.h2.console.path=/h2-console
+Main Application Class
+package com.example.userauth;
+import org.springframework.boot.SpringApplication;
+import org.springframework.boot.autoconfigure.SpringBootApplication;
+@SpringBootApplication
+public class UserAuthDemoApplication {
+ public static void main(String[] args) {
+ SpringApplication.run(UserAuthDemoApplication.class, args);
+ }
+}
+Step 1: model/AppUser.java (JPA Entity)
+package com.example.userauth.model;
+import com.fasterxml.jackson.annotation.JsonProperty;
+import jakarta.persistence.Column;
+import jakarta.persistence.Entity;
+import jakarta.persistence.GeneratedValue;
+import jakarta.persistence.GenerationType;
+import jakarta.persistence.Id;
+@Entity
+public class AppUser {
+ @Id
+ @GeneratedValue(strategy = GenerationType.IDENTITY)
+ private int userId;
+ @Column(unique = true, nullable = false)
+ private String username;
+Practical No. 16 - User Registration and Login with BCrypt Page 3
+ // BCrypt hash is stored here. WRITE_ONLY: accepted in request JSON,
+ // but never written into any response JSON.
+ @JsonProperty(access = JsonProperty.Access.WRITE_ONLY)
+ @Column(nullable = false)
+ private String password;
+ private String role;
+ public AppUser() { }
+ public int getUserId() { return userId; }
+ public void setUserId(int userId) { this.userId = userId; }
+ public String getUsername() { return username; }
+ public void setUsername(String username) { this.username = username; }
+ public String getPassword() { return password; }
+ public void setPassword(String password) { this.password = password; }
+ public String getRole() { return role; }
+ public void setRole(String role) { this.role = role; }
+}
+Step 1: repository/AppUserRepository.java
+package com.example.userauth.repository;
+import com.example.userauth.model.AppUser;
+import java.util.Optional;
+import org.springframework.data.jpa.repository.JpaRepository;
+public interface AppUserRepository extends JpaRepository<AppUser, Integer> {
+ // derived query: SELECT * FROM app_user WHERE username = ?
+ Optional<AppUser> findByUsername(String username);
+}
+Step 2: service/CustomUserDetailsService.java
+package com.example.userauth.service;
+import com.example.userauth.model.AppUser;
+import com.example.userauth.repository.AppUserRepository;
+import org.springframework.security.core.userdetails.User;
+import org.springframework.security.core.userdetails.UserDetails;
+import org.springframework.security.core.userdetails.UserDetailsService;
+import org.springframework.security.core.userdetails.UsernameNotFoundException;
+import org.springframework.stereotype.Service;
+@Service
+public class CustomUserDetailsService implements UserDetailsService {
+ private final AppUserRepository appUserRepository;
+ public CustomUserDetailsService(AppUserRepository appUserRepository) {
+ this.appUserRepository = appUserRepository;
+ }
+ @Override
+ public UserDetails loadUserByUsername(String username)
+ throws UsernameNotFoundException {
+ AppUser appUser = appUserRepository.findByUsername(username)
+ .orElseThrow(() ->
+ new UsernameNotFoundException("User not found: " + username));
+ // The stored password is already BCrypt-encoded; Spring Security compares the
+ // plain password sent by the client with this hash using the PasswordEncoder.
+ return User.withUsername(appUser.getUsername())
+ .password(appUser.getPassword())
+ .roles(appUser.getRole()) // becomes authority ROLE_<role>
+ .build();
+ }
+}
+Practical No. 16 - User Registration and Login with BCrypt Page 4
+Step 3: config/SecurityConfig.java
+package com.example.userauth.config;
+import com.example.userauth.service.CustomUserDetailsService;
+import org.springframework.boot.autoconfigure.security.servlet.PathRequest;
+import org.springframework.context.annotation.Bean;
+import org.springframework.context.annotation.Configuration;
+import org.springframework.security.authentication.AuthenticationProvider;
+import org.springframework.security.authentication.dao.DaoAuthenticationProvider;
+import org.springframework.security.config.Customizer;
+import org.springframework.security.config.annotation.web.builders.HttpSecurity;
+import org.springframework.security.config.annotation.web.configuration.EnableWebSecurity;
+import org.springframework.security.config.http.SessionCreationPolicy;
+import org.springframework.security.crypto.bcrypt.BCryptPasswordEncoder;
+import org.springframework.security.crypto.password.PasswordEncoder;
+import org.springframework.security.web.SecurityFilterChain;
+@Configuration
+@EnableWebSecurity
+public class SecurityConfig {
+ @Bean
+ public PasswordEncoder passwordEncoder() {
+ return new BCryptPasswordEncoder();
+ }
+ // Authenticates against the database using our UserDetailsService + BCrypt
+ @Bean
+ public AuthenticationProvider authenticationProvider(
+ CustomUserDetailsService userDetailsService, PasswordEncoder passwordEncoder) {
+ DaoAuthenticationProvider provider = new DaoAuthenticationProvider();
+ provider.setUserDetailsService(userDetailsService);
+ provider.setPasswordEncoder(passwordEncoder);
+ return provider;
+ }
+ @Bean
+ public SecurityFilterChain filterChain(HttpSecurity http,
+ AuthenticationProvider authenticationProvider)
+ throws Exception {
+ http
+ .csrf(csrf -> csrf.disable()) // stateless REST API + Basic Auth
+ .sessionManagement(s -> s.sessionCreationPolicy(SessionCreationPolicy.STATELESS))
+ .authenticationProvider(authenticationProvider)
+ .authorizeHttpRequests(auth -> auth
+ .requestMatchers("/api/auth/register").permitAll()
+ .requestMatchers("/api/public/**").permitAll()
+ .requestMatchers(PathRequest.toH2Console()).permitAll() // dev only
+ .requestMatchers("/api/auth/profile", "/api/auth/deregister").authenticated()
+ .requestMatchers("/api/secure/**").authenticated()
+ .anyRequest().authenticated()
+ )
+ .httpBasic(Customizer.withDefaults())
+ .headers(h -> h.frameOptions(f -> f.sameOrigin())); // for H2 console frames
+ return http.build();
+ }
+}
+Steps 4 and 6: controller/AuthController.java
+package com.example.userauth.controller;
+import com.example.userauth.model.AppUser;
+import com.example.userauth.repository.AppUserRepository;
+import java.util.Map;
+import java.util.Optional;
+import org.springframework.http.HttpStatus;
+import org.springframework.http.ResponseEntity;
+import org.springframework.security.core.Authentication;
+import org.springframework.security.crypto.password.PasswordEncoder;
+import org.springframework.web.bind.annotation.*;
+Practical No. 16 - User Registration and Login with BCrypt Page 5
+@RestController
+@RequestMapping("/api/auth")
+public class AuthController {
+ private final AppUserRepository appUserRepository;
+ private final PasswordEncoder passwordEncoder;
+ public AuthController(AppUserRepository appUserRepository,
+ PasswordEncoder passwordEncoder) {
+ this.appUserRepository = appUserRepository;
+ this.passwordEncoder = passwordEncoder;
+ }
+ // POST /api/auth/register (public) -> 201 Created
+ @PostMapping("/register")
+ public ResponseEntity<?> register(@RequestBody AppUser user) {
+ if (isBlank(user.getUsername()) || isBlank(user.getPassword())) {
+ return ResponseEntity.badRequest()
+ .body(Map.of("error", "username and password are required"));
+ }
+ if (appUserRepository.findByUsername(user.getUsername()).isPresent()) {
+ return ResponseEntity.status(HttpStatus.CONFLICT)
+ .body(Map.of("error", "Username already exists"));
+ }
+ user.setUserId(0); // force INSERT
+ user.setPassword(passwordEncoder.encode(user.getPassword())); // BCrypt hash
+ if (isBlank(user.getRole())) {
+ user.setRole("USER");
+ }
+ AppUser saved = appUserRepository.save(user);
+ return ResponseEntity.status(HttpStatus.CREATED).body(saved);
+ }
+ // PUT /api/auth/profile (secured) -> 200 OK
+ // Updates the username and/or role of the currently authenticated user only.
+ @PutMapping("/profile")
+ public ResponseEntity<?> updateProfile(Authentication authentication,
+ @RequestBody AppUser updated) {
+ Optional<AppUser> found = appUserRepository.findByUsername(authentication.getName());
+ if (found.isEmpty()) {
+ return ResponseEntity.notFound().build();
+ }
+ AppUser current = found.get();
+ String newName = updated.getUsername();
+ if (!isBlank(newName) && !newName.equals(current.getUsername())) {
+ if (appUserRepository.findByUsername(newName).isPresent()) {
+ return ResponseEntity.status(HttpStatus.CONFLICT)
+ .body(Map.of("error", "Username already exists"));
+ }
+ current.setUsername(newName);
+ }
+ if (!isBlank(updated.getRole())) {
+ current.setRole(updated.getRole());
+ }
+ return ResponseEntity.ok(appUserRepository.save(current));
+ }
+ // DELETE /api/auth/deregister (secured) -> 204 No Content
+ // Removes the account of the currently authenticated user only.
+ @DeleteMapping("/deregister")
+ public ResponseEntity<Void> deregister(Authentication authentication) {
+ appUserRepository.findByUsername(authentication.getName())
+ .ifPresent(appUserRepository::delete);
+ return ResponseEntity.noContent().build();
+ }
+ private boolean isBlank(String s) {
+ return s == null || s.isBlank();
+ }
+}
+controller/SecureController.java (secured endpoint used for the login test)
+Practical No. 16 - User Registration and Login with BCrypt Page 6
+package com.example.userauth.controller;
+import java.util.Map;
+import org.springframework.security.core.Authentication;
+import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.RequestMapping;
+import org.springframework.web.bind.annotation.RestController;
+@RestController
+@RequestMapping("/api/secure")
+public class SecureController {
+ @GetMapping("/data")
+ public Map<String, String> secureData(Authentication authentication) {
+ return Map.of("message", "Secured data returned",
+ "loggedInUser", authentication.getName());
+ }
+}
+Run the Application
+cd user-auth-demo
+mvn clean spring-boot:run
+# Server: http://localhost:8080
+Step 5: Verify the BCrypt Hash in the H2 Console
+Open http://localhost:8080/h2-console, set JDBC URL to jdbc:h2:mem:userdb, User Name
+sa, empty password, click Connect, then run:
+SELECT USER_ID, USERNAME, PASSWORD, ROLE FROM APP_USER;
+-- Expected: PASSWORD column looks like a 60-character BCrypt hash, e.g.
+-- $2a$10$7Qe............................................... (NOT "MyP@ss123")
+Postman API Testing
+For secured requests use Authorization tab -> Type: Basic Auth -> Username neha01, Password
+MyP@ss123 (the original plain-text password, not the hash). For POST/PUT set Body -> raw -> JSON.
+# Method Endpoint Auth / Body Expected Response
+1 POST /api/auth/register None + {"username":"neha01","password":"
+MyP@ss123","role":"USER"}
+201 Created - user saved with BCrypt
+hashed password (password not
+shown in response)
+2 GET /api/secure/data None (no auth) 401 Unauthorized
+3 GET /api/secure/data Basic Auth: neha01 / MyP@ss123 200 OK - authenticated against the
+BCrypt-hashed DB password
+4 GET /api/secure/data Basic Auth: neha01 / wrongPass 401 Unauthorized
+5 PUT /api/auth/profile Basic Auth: neha01 / MyP@ss123 +
+{"role":"USER_PREMIUM"}
+200 OK - role updated for the
+authenticated user
+6 DELET
+E
+/api/auth/deregister Basic Auth: neha01 / MyP@ss123 204 No Content - account removed
+from the database
+7 GET /api/secure/data Basic Auth: neha01 / MyP@ss123 (after
+deregister)
+401 Unauthorized - user no longer
+exists
+8 POST /api/auth/register Same username registered twice 409 Conflict
+Sample cURL Commands (optional cross-check)
+curl -i -X POST http://localhost:8080/api/auth/register \
+ -H "Content-Type: application/json" \
+ -d '{"username":"neha01","password":"MyP@ss123","role":"USER"}'
+curl -i http://localhost:8080/api/secure/data
+Practical No. 16 - User Registration and Login with BCrypt Page 7
+curl -i -u 'neha01:MyP@ss123' http://localhost:8080/api/secure/data
+curl -i -u 'neha01:MyP@ss123' -X PUT http://localhost:8080/api/auth/profile \
+ -H "Content-Type: application/json" -d '{"role":"USER_PREMIUM"}'
+curl -i -u 'neha01:MyP@ss123' -X DELETE http://localhost:8080/api/auth/deregister
+Key Points to Remember
+• Never store plain-text passwords. passwordEncoder.encode() produces a salted one-way
+BCrypt hash; the same password gives a different hash each time because of the random salt.
+• Login flow: Basic Auth header -> DaoAuthenticationProvider -> CustomUserDetailsService loads the
+user from H2 -> PasswordEncoder.matches(plain, hash) -> access granted or 401.
+• Roles: .roles("USER") adds the ROLE_ prefix automatically, so store the role without it (USER, not
+ROLE_USER); otherwise Spring throws an IllegalArgumentException.
+• Changing username: after PUT /api/auth/profile changes the username, use the new username for
+later requests.
+• Security note: letting a user change their own role is a privilege-escalation risk. It is done here only
+because the practical requires it; in real systems roles are changed by an admin.
+• H2 in-memory: all registered users disappear when the app restarts. Use
+jdbc:h2:file:./data/userdb to keep data between runs.
+Conclusion
+A database-backed registration and login system was built: passwords are BCrypt-encoded before being
+saved in H2, authentication is performed through a custom UserDetailsService and
+DaoAuthenticationProvider, and authenticated users can update their profile or deregister their own
+account.
