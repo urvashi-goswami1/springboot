@@ -1,0 +1,304 @@
+Practical No. 10
+Layered Microservice Architecture – RestController + Service + JPA Repository
+Textbook Reference: Chapter 6 — Building RESTful Microservices
+Objective
+Structure a RESTful microservice into the standard Controller–Service–Repository layers, keeping business
+logic out of the controller and persistence access out of the service. The project uses Spring Boot, Spring
+Data JPA, Maven, and an embedded H2 database.
+Project Setup Summary
+Build tool: Maven | Framework: Spring Boot | Database: H2 (in-memory) | Base package:
+com.example.productapi
+Package layout: entity, repository, service, controller — each class below belongs to the
+package named in its filename bar.
+1. Maven Configuration
+pom.xml (project root)
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+ xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+ xsi:schemaLocation="http://maven.apache.org/POM/4.0.0
+ https://maven.apache.org/xsd/maven-4.0.0.xsd">
+ <modelVersion>4.0.0</modelVersion>
+ <parent>
+ <groupId>org.springframework.boot</groupId>
+ <artifactId>spring-boot-starter-parent</artifactId>
+ <version>3.3.4</version>
+ <relativePath/>
+ </parent>
+ <groupId>com.example</groupId>
+ <artifactId>product-api</artifactId>
+ <version>0.0.1-SNAPSHOT</version>
+ <name>product-api</name>
+ <description>Practical 10 - Layered Microservice (Controller-Service-Repository)</description>
+ <properties>
+ <java.version>17</java.version>
+ </properties>
+ <dependencies>
+ <!-- Web / REST -->
+ <dependency>
+ <groupId>org.springframework.boot</groupId>
+ <artifactId>spring-boot-starter-web</artifactId>
+ </dependency>
+ <!-- Spring Data JPA -->
+ <dependency>
+ <groupId>org.springframework.boot</groupId>
+ <artifactId>spring-boot-starter-data-jpa</artifactId>
+ </dependency>
+ <!-- H2 in-memory database -->
+ <dependency>
+ <groupId>com.h2database</groupId>
+ <artifactId>h2</artifactId>
+ <scope>runtime</scope>
+ </dependency>
+ <!-- Validation (optional but recommended) -->
+ <dependency>
+ <groupId>org.springframework.boot</groupId>
+ <artifactId>spring-boot-starter-validation</artifactId>
+ </dependency>
+ <!-- Lombok (reduces boilerplate getters/setters) -->
+ <dependency>
+ <groupId>org.projectlombok</groupId>
+ <artifactId>lombok</artifactId>
+ <optional>true</optional>
+ </dependency>
+ <!-- Testing -->
+ <dependency>
+ <groupId>org.springframework.boot</groupId>
+ <artifactId>spring-boot-starter-test</artifactId>
+ <scope>test</scope>
+ </dependency>
+ </dependencies>
+ <build>
+ <plugins>
+ <plugin>
+ <groupId>org.springframework.boot</groupId>
+ <artifactId>spring-boot-maven-plugin</artifactId>
+ </plugin>
+ </plugins>
+ </build>
+</project>
+2. H2 Database Configuration
+src/main/resources/application.properties
+# ---- Server ----
+server.port=8080
+# ---- H2 Datasource (in-memory) ----
+spring.datasource.url=jdbc:h2:mem:productdb;DB_CLOSE_DELAY=-1
+spring.datasource.driverClassName=org.h2.Driver
+spring.datasource.username=sa
+spring.datasource.password=
+# ---- JPA / Hibernate ----
+spring.jpa.database-platform=org.hibernate.dialect.H2Dialect
+spring.jpa.hibernate.ddl-auto=update
+spring.jpa.show-sql=true
+spring.jpa.properties.hibernate.format_sql=true
+# ---- H2 Console (browser-based DB viewer) ----
+spring.h2.console.enabled=true
+spring.h2.console.path=/h2-console
+# Access at: http://localhost:8080/h2-console
+# JDBC URL to use in the console: jdbc:h2:mem:productdb
+3. Entity — Product.java (reused)
+src/main/java/com/example/productapi/entity/Product.java
+package com.example.productapi.entity;
+import jakarta.persistence.*;
+import lombok.AllArgsConstructor;
+import lombok.Data;
+import lombok.NoArgsConstructor;
+@Entity
+@Table(name = "products")
+@Data
+@NoArgsConstructor
+@AllArgsConstructor
+public class Product {
+ @Id
+ @GeneratedValue(strategy = GenerationType.IDENTITY)
+ private Long productId;
+ private String productName;
+ private String category;
+ private Double price;
+ private Integer quantity;
+}
+4. Repository Layer
+src/main/java/com/example/productapi/repository/ProductRepository.java
+package com.example.productapi.repository;
+import com.example.productapi.entity.Product;
+import org.springframework.data.jpa.repository.JpaRepository;
+import org.springframework.stereotype.Repository;
+@Repository
+public interface ProductRepository extends JpaRepository<Product, Long> {
+ // CRUD methods (save, findAll, findById, deleteById, etc.)
+ // are inherited from JpaRepository - no extra code needed.
+}
+5. Service Layer
+5.1 Interface — declares the CRUD contract only.
+src/main/java/com/example/productapi/service/ProductService.java
+package com.example.productapi.service;
+import com.example.productapi.entity.Product;
+import java.util.List;
+public interface ProductService {
+ Product create(Product product);
+ List<Product> getAll();
+ Product getById(Long id);
+ Product update(Long id, Product product);
+ void delete(Long id);
+}
+5.2 Implementation — holds the business logic; the only class that talks to the
+repository.
+src/main/java/com/example/productapi/service/ProductServiceImpl.java
+package com.example.productapi.service;
+import com.example.productapi.entity.Product;
+import com.example.productapi.repository.ProductRepository;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.stereotype.Service;
+import java.util.List;
+import java.util.NoSuchElementException;
+@Service
+public class ProductServiceImpl implements ProductService {
+ private final ProductRepository productRepository;
+ @Autowired
+ public ProductServiceImpl(ProductRepository productRepository) {
+ this.productRepository = productRepository;
+ }
+ @Override
+ public Product create(Product product) {
+ return productRepository.save(product);
+ }
+ @Override
+ public List<Product> getAll() {
+ return productRepository.findAll();
+ }
+ @Override
+ public Product getById(Long id) {
+ return productRepository.findById(id)
+ .orElseThrow(() -> new NoSuchElementException(
+ "Product not found with id: " + id));
+ }
+ @Override
+ public Product update(Long id, Product product) {
+ // 1. Fetch the existing entity
+ Product existing = productRepository.findById(id)
+ .orElseThrow(() -> new NoSuchElementException(
+ "Product not found with id: " + id));
+ // 2. Apply changes (only overwrite fields that were supplied)
+ if (product.getProductName() != null) {
+ existing.setProductName(product.getProductName());
+ }
+ if (product.getCategory() != null) {
+ existing.setCategory(product.getCategory());
+ }
+ if (product.getPrice() != null) {
+ existing.setPrice(product.getPrice());
+ }
+ if (product.getQuantity() != null) {
+ existing.setQuantity(product.getQuantity());
+ }
+ // 3. Persist the merged entity
+ return productRepository.save(existing);
+ }
+ @Override
+ public void delete(Long id) {
+ if (!productRepository.existsById(id)) {
+ throw new NoSuchElementException("Product not found with id: " + id);
+ }
+ productRepository.deleteById(id);
+ }
+}
+6. Controller Layer
+The controller injects ProductService only — it never references ProductRepository directly. This
+keeps persistence access confined to the service layer, satisfying the layering rule from Chapter 6.
+src/main/java/com/example/productapi/controller/ProductRestController.java
+package com.example.productapi.controller;
+import com.example.productapi.entity.Product;
+import com.example.productapi.service.ProductService;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.http.HttpStatus;
+import org.springframework.http.ResponseEntity;
+import org.springframework.web.bind.annotation.*;
+import java.util.List;
+@RestController
+@RequestMapping("/api/products")
+public class ProductRestController {
+ private final ProductService productService;
+ @Autowired
+ public ProductRestController(ProductService productService) {
+ this.productService = productService;
+ }
+ // CREATE -> POST /api/products
+ @PostMapping
+ public ResponseEntity<Product> createProduct(@RequestBody Product product) {
+ Product saved = productService.create(product);
+ return new ResponseEntity<>(saved, HttpStatus.CREATED);
+ }
+ // READ ALL -> GET /api/products
+ @GetMapping
+ public ResponseEntity<List<Product>> getAllProducts() {
+ return ResponseEntity.ok(productService.getAll());
+ }
+ // READ ONE -> GET /api/products/{id}
+ @GetMapping("/{id}")
+ public ResponseEntity<Product> getProductById(@PathVariable Long id) {
+ return ResponseEntity.ok(productService.getById(id));
+ }
+ // UPDATE -> PUT /api/products/{id}
+ @PutMapping("/{id}")
+ public ResponseEntity<Product> updateProduct(@PathVariable Long id,
+ @RequestBody Product product) {
+ Product updated = productService.update(id, product);
+ return ResponseEntity.ok(updated);
+ }
+ // DELETE -> DELETE /api/products/{id}
+ @DeleteMapping("/{id}")
+ public ResponseEntity<Void> deleteProduct(@PathVariable Long id) {
+ productService.delete(id);
+ return ResponseEntity.noContent().build(); // 204
+ }
+}
+7. Application Entry Point
+src/main/java/com/example/productapi/ProductApiApplication.java
+package com.example.productapi;
+import org.springframework.boot.SpringApplication;
+import org.springframework.boot.autoconfigure.SpringBootApplication;
+@SpringBootApplication
+public class ProductApiApplication {
+ public static void main(String[] args) {
+ SpringApplication.run(ProductApiApplication.class, args);
+ }
+}
+8. Code Review — Layering Check
+Controller → injects ProductService only. Service → injects ProductRepository only, and contains
+all business logic (fetch-modify-save for update, existence check for delete). Repository → a plain
+JpaRepository, no logic. Grep confirms zero references to ProductRepository inside
+ProductRestController.java, so the layering is correctly enforced.
+9. Postman API Testing
+Import these four requests into a Postman Collection named Product CRUD API (base URL
+http://localhost:8080) and run them in order to exercise the full CRUD lifecycle.
+Method Endpoint Request Body / Params Expected Response
+POST /api/products { "productName":"Laptop",
+"category":"Electronics",
+"price":55000,
+"quantity":10 }
+201 Created — returns saved
+Product with generated
+productId
+GET /api/products None 200 OK — JSON array of all
+products
+GET /api/products/{id} None 200 OK — single product, or
+404-style error if not found
+PUT /api/products/{id} { "productName":"Laptop
+Pro", "price":60000 }
+200 OK — updated product
+(fetched, merged, saved in
+the service)
+DELETE /api/products/{id} None 204 No Content
+Notes for Testing
+• Set the Postman request header Content-Type: application/json for POST and PUT calls.
+• Save each request into a Collection and use {{baseUrl}} as a Postman environment variable (e.g.
+http://localhost:8080) so the collection is reusable across environments.
+• The H2 console (/h2-console) can be used alongside Postman to visually confirm that
+CREATE/UPDATE/DELETE requests are reflected in the PRODUCTS table.
+How to Run
+1. Place the files in the package structure shown above.
+2. Run mvn spring-boot:run (or run ProductApiApplication from an IDE).
+3. The API is available at http://localhost:8080/api/products.
+4. Open http://localhost:8080/h2-console and connect with JDBC URL
+jdbc:h2:mem:productdb, username sa, empty password.
+5. Execute the Postman requests from the table above in order: POST → GET (all) → GET (by id) → PUT →
+DELETE.
