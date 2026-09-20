@@ -1,0 +1,260 @@
+Practical No. 13
+Request Validation using Bean Validation (@Valid) with RestController
+Textbook Reference: Chapter 6 — Building RESTful Microservices
+Objective
+Validate incoming JSON payloads declaratively using Jakarta Bean Validation annotations (@NotBlank,
+@Email, @Min) combined with @Valid on the controller method. Built with Spring Boot, Spring Data JPA,
+Maven, and an embedded H2 database.
+Project Setup Summary
+Build tool: Maven | Framework: Spring Boot | Database: H2 (in-memory) | Base package:
+com.example.customerapi
+Package layout: entity, repository, controller.
+The class list marks Customer as “@Entity / DTO, reused”, so — as in the task instructions — the JPA entity itself
+carries the validation annotations and is used directly as the request/response body, with no separate DTO/mapper
+layer for this practical.
+1. Maven Configuration
+pom.xml (project root)
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+ xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+ xsi:schemaLocation="http://maven.apache.org/POM/4.0.0
+ https://maven.apache.org/xsd/maven-4.0.0.xsd">
+ <modelVersion>4.0.0</modelVersion>
+ <parent>
+ <groupId>org.springframework.boot</groupId>
+ <artifactId>spring-boot-starter-parent</artifactId>
+ <version>3.3.4</version>
+ <relativePath/>
+ </parent>
+ <groupId>com.example</groupId>
+ <artifactId>customer-validation-api</artifactId>
+ <version>0.0.1-SNAPSHOT</version>
+ <name>customer-validation-api</name>
+ <description>Practical 13 - Request Validation using Bean Validation (@Valid)</description>
+ <properties>
+ <java.version>17</java.version>
+ </properties>
+ <dependencies>
+ <dependency>
+ <groupId>org.springframework.boot</groupId>
+ <artifactId>spring-boot-starter-web</artifactId>
+ </dependency>
+ <dependency>
+ <groupId>org.springframework.boot</groupId>
+ <artifactId>spring-boot-starter-data-jpa</artifactId>
+ </dependency>
+ <!-- H2 in-memory database -->
+ <dependency>
+ <groupId>com.h2database</groupId>
+ <artifactId>h2</artifactId>
+ <scope>runtime</scope>
+ </dependency>
+ <!-- Step 1: Bean Validation starter (Jakarta Validation / Hibernate Validator) -->
+ <dependency>
+ <groupId>org.springframework.boot</groupId>
+ <artifactId>spring-boot-starter-validation</artifactId>
+ </dependency>
+ <dependency>
+ <groupId>org.projectlombok</groupId>
+ <artifactId>lombok</artifactId>
+ <optional>true</optional>
+ </dependency>
+ <dependency>
+ <groupId>org.springframework.boot</groupId>
+ <artifactId>spring-boot-starter-test</artifactId>
+ <scope>test</scope>
+ </dependency>
+ </dependencies>
+ <build>
+ <plugins>
+ <plugin>
+ <groupId>org.springframework.boot</groupId>
+ <artifactId>spring-boot-maven-plugin</artifactId>
+ </plugin>
+ </plugins>
+ </build>
+</project>
+2. H2 Database Configuration
+src/main/resources/application.properties
+# ---- Server ----
+server.port=8080
+# ---- H2 Datasource (in-memory) ----
+spring.datasource.url=jdbc:h2:mem:customervaldb;DB_CLOSE_DELAY=-1
+spring.datasource.driverClassName=org.h2.Driver
+spring.datasource.username=sa
+spring.datasource.password=
+# ---- JPA / Hibernate ----
+spring.jpa.database-platform=org.hibernate.dialect.H2Dialect
+spring.jpa.hibernate.ddl-auto=update
+spring.jpa.show-sql=true
+spring.jpa.properties.hibernate.format_sql=true
+# ---- H2 Console ----
+spring.h2.console.enabled=true
+spring.h2.console.path=/h2-console
+# Access at: http://localhost:8080/h2-console
+# JDBC URL to use in the console: jdbc:h2:mem:customervaldb
+3. Entity — Customer.java (with validation annotations)
+src/main/java/com/example/customerapi/entity/Customer.java
+package com.example.customerapi.entity;
+import jakarta.persistence.*;
+import jakarta.validation.constraints.Email;
+import jakarta.validation.constraints.Min;
+import jakarta.validation.constraints.NotBlank;
+import lombok.AllArgsConstructor;
+import lombok.Data;
+import lombok.NoArgsConstructor;
+@Entity
+@Table(name = "customers")
+@Data
+@NoArgsConstructor
+@AllArgsConstructor
+public class Customer {
+ @Id
+ @GeneratedValue(strategy = GenerationType.IDENTITY)
+ private int customerId;
+ @NotBlank(message = "name must not be blank")
+ private String name;
+ @Email(message = "email must be a well-formed email address")
+ private String email;
+ @Min(value = 18, message = "age must be at least 18")
+ private int age;
+}
+4. Repository Layer
+src/main/java/com/example/customerapi/repository/CustomerRepository.java
+package com.example.customerapi.repository;
+import com.example.customerapi.entity.Customer;
+import org.springframework.data.jpa.repository.JpaRepository;
+import org.springframework.stereotype.Repository;
+@Repository
+public interface CustomerRepository extends JpaRepository<Customer, Integer> {
+}
+5. Controller — CustomerRestController.java
+@Valid is placed on the @RequestBody parameter of both create and update. If any constraint fails,
+Spring throws MethodArgumentNotValidException before the method body ever runs, and — with no
+exception handler registered yet — the framework's default response is a plain 400 Bad Request. A
+dedicated GlobalExceptionHandler to turn this into structured field-level error JSON is planned for the
+next practical, as noted in step 5 of the task.
+src/main/java/com/example/customerapi/controller/CustomerRestController.java
+package com.example.customerapi.controller;
+import com.example.customerapi.entity.Customer;
+import com.example.customerapi.repository.CustomerRepository;
+import jakarta.validation.Valid;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.http.HttpStatus;
+import org.springframework.http.ResponseEntity;
+import org.springframework.web.bind.annotation.*;
+import java.util.NoSuchElementException;
+@RestController
+@RequestMapping("/api/customers")
+public class CustomerRestController {
+ private final CustomerRepository customerRepository;
+ @Autowired
+ public CustomerRestController(CustomerRepository customerRepository) {
+ this.customerRepository = customerRepository;
+ }
+ // POST /api/customers - @Valid triggers @NotBlank / @Email / @Min checks
+ // before this method body runs. Invalid payloads never reach the save() call.
+ @PostMapping
+ public ResponseEntity<Customer> create(@Valid @RequestBody Customer customer) {
+ Customer saved = customerRepository.save(customer);
+ return new ResponseEntity<>(saved, HttpStatus.CREATED);
+ }
+ // GET /api/customers/{id} - fetch a saved customer
+ @GetMapping("/{id}")
+ public ResponseEntity<Customer> getById(@PathVariable int id) {
+ Customer customer = customerRepository.findById(id)
+ .orElseThrow(() -> new NoSuchElementException(
+ "Customer not found with id: " + id));
+ return ResponseEntity.ok(customer);
+ }
+ // PUT /api/customers/{id} - validated the same way as creation
+ @PutMapping("/{id}")
+ public ResponseEntity<Customer> update(@PathVariable int id,
+ @Valid @RequestBody Customer customer) {
+ Customer existing = customerRepository.findById(id)
+ .orElseThrow(() -> new NoSuchElementException(
+ "Customer not found with id: " + id));
+ existing.setName(customer.getName());
+ existing.setEmail(customer.getEmail());
+ existing.setAge(customer.getAge());
+ Customer updated = customerRepository.save(existing);
+ return ResponseEntity.ok(updated);
+ }
+ // DELETE /api/customers/{id}
+ @DeleteMapping("/{id}")
+ public ResponseEntity<Void> delete(@PathVariable int id) {
+ if (!customerRepository.existsById(id)) {
+ throw new NoSuchElementException("Customer not found with id: " + id);
+ }
+ customerRepository.deleteById(id);
+ return ResponseEntity.noContent().build(); // 204
+ }
+}
+6. Application Entry Point
+src/main/java/com/example/customerapi/CustomerValidationApiApplication.java
+package com.example.customerapi;
+import org.springframework.boot.SpringApplication;
+import org.springframework.boot.autoconfigure.SpringBootApplication;
+@SpringBootApplication
+public class CustomerValidationApiApplication {
+ public static void main(String[] args) {
+ SpringApplication.run(CustomerValidationApiApplication.class, args);
+ }
+}
+7. Validation Rules Applied
+Field Annotation Rule Fails on
+name @NotBlank Must not be null and must contain
+non-whitespace text
+"" (empty
+string)
+email @Email Must be a well-formed email address "bad-email"
+age @Min(18) Must be ≥ 18 15
+A typical default Spring response body for a failed @Valid check (before a GlobalExceptionHandler is
+added) looks like this:
+Example raw 400 response (fields not yet itemized)
+HTTP/1.1 400 Bad Request
+Content-Type: application/json
+{
+ "timestamp": "2026-09-21T10:15:30.123+00:00",
+ "status": 400,
+ "error": "Bad Request",
+ "path": "/api/customers"
+}
+8. Postman API Testing
+Import these five requests into a Postman Collection named Customer Validation API (base URL
+http://localhost:8080), and run them in order.
+Method Endpoint Request Body / Params Expected Response
+POST /api/customers { "name":"",
+"email":"bad-email",
+"age":15 }
+400 Bad Request —
+validation failure (all three
+constraints violated)
+POST /api/customers { "name":"Sneha", "emai
+l":"sneha@svgu.edu",
+"age":21 }
+201 Created
+GET /api/customers/{id} None 200 OK — saved Customer
+PUT /api/customers/{id} { "name":"Sneha",
+"email":"not-an-email",
+"age":21 }
+400 Bad Request — @Valid
+rejects the malformed email
+on update
+DELETE /api/customers/{id} None 204 No Content
+Notes for Testing
+• Set header Content-Type: application/json for every POST and PUT.
+• Run request 1 first to observe the raw 400 response with no field-level detail, then request 2 with fully valid
+data to get a 201 and capture the generated customerId for use as {id} in the remaining requests.
+• Request 4 reuses that same id but sends a malformed email in the PUT body to confirm @Valid is applied
+identically on update, not just on create.
+• Save all five requests into the Postman Collection for reuse in the next practical, where a
+GlobalExceptionHandler will turn these bare 400 responses into structured per-field error messages.
+How to Run
+1. Place the files in the package structure shown above.
+2. Run mvn spring-boot:run (or run CustomerValidationApiApplication from an IDE).
+3. The API is available at http://localhost:8080/api/customers.
+4. Open http://localhost:8080/h2-console and connect with JDBC URL
+jdbc:h2:mem:customervaldb, username sa, empty password.
+5. Execute the Postman requests in order: invalid POST (400) → valid POST (201) → GET by id (200) →
+invalid PUT (400) → DELETE (204).
