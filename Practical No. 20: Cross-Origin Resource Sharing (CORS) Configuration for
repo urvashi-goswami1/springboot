@@ -1,0 +1,405 @@
+Practical No. 20 - CORS Configuration for Secured REST APIs Page 1
+Practical No. 20
+Cross-Origin Resource Sharing (CORS) for Secured REST APIs
+Spring Boot 3 + Maven + H2 Database + Spring Data JPA + Spring Security (Basic Auth)
+Objective
+To configure CORS at application level so that a secured REST API (HTTP Basic Auth, Notes stored in
+H2) can be consumed by a browser frontend running on a different origin (http://localhost:3000), while
+every other origin is rejected.
+What is an origin? Scheme + host + port. The API at http://localhost:8080 and a frontend at
+http://localhost:3000 are different origins (different port), so the browser's same-origin policy stops the
+frontend's JavaScript from reading the API's response unless the API answers with an
+Access-Control-Allow-Origin header that names the frontend. Requests with a custom header
+(Authorization) or JSON body, or with PUT/DELETE, are first preceded by a preflight OPTIONS request that
+carries no credentials.
+Project Structure
+cors-demo/
+ |-- pom.xml
+ |-- frontend/index.html (sample frontend, served on port 3000)
+ `-- src/main/
+ |-- java/com/example/corsdemo/
+ | |-- CorsDemoApplication.java
+ | |-- config/CorsConfig.java (Step 1)
+ | |-- config/SecurityConfig.java (Step 2: .cors(...))
+ | |-- model/Note.java
+ | |-- repository/NoteRepository.java
+ | `-- controller/SecureNoteController.java
+ `-- resources/application.properties
+pom.xml (Maven)
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+ xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+ xsi:schemaLocation="http://maven.apache.org/POM/4.0.0
+ https://maven.apache.org/xsd/maven-4.0.0.xsd">
+ <modelVersion>4.0.0</modelVersion>
+ <parent>
+ <groupId>org.springframework.boot</groupId>
+ <artifactId>spring-boot-starter-parent</artifactId>
+ <version>3.3.5</version>
+ <relativePath/>
+ </parent>
+ <groupId>com.example</groupId>
+ <artifactId>cors-demo</artifactId>
+ <version>0.0.1-SNAPSHOT</version>
+ <name>cors-demo</name>
+ <properties>
+ <java.version>17</java.version>
+ </properties>
+ <dependencies>
+ <dependency>
+ <groupId>org.springframework.boot</groupId>
+ <artifactId>spring-boot-starter-web</artifactId>
+ </dependency>
+ <dependency>
+ <groupId>org.springframework.boot</groupId>
+ <artifactId>spring-boot-starter-security</artifactId>
+Practical No. 20 - CORS Configuration for Secured REST APIs Page 2
+ </dependency>
+ <dependency>
+ <groupId>org.springframework.boot</groupId>
+ <artifactId>spring-boot-starter-data-jpa</artifactId>
+ </dependency>
+ <dependency>
+ <groupId>com.h2database</groupId>
+ <artifactId>h2</artifactId>
+ <scope>runtime</scope>
+ </dependency>
+ <dependency>
+ <groupId>org.springframework.boot</groupId>
+ <artifactId>spring-boot-starter-test</artifactId>
+ <scope>test</scope>
+ </dependency>
+ </dependencies>
+ <build>
+ <plugins>
+ <plugin>
+ <groupId>org.springframework.boot</groupId>
+ <artifactId>spring-boot-maven-plugin</artifactId>
+ </plugin>
+ </plugins>
+ </build>
+</project>
+application.properties
+spring.application.name=cors-demo
+# H2 in-memory database
+spring.datasource.url=jdbc:h2:mem:notesdb
+spring.datasource.driver-class-name=org.h2.Driver
+spring.datasource.username=sa
+spring.datasource.password=
+spring.jpa.hibernate.ddl-auto=create-drop
+spring.jpa.show-sql=true
+spring.jpa.database-platform=org.hibernate.dialect.H2Dialect
+# H2 web console -> http://localhost:8080/h2-console
+spring.h2.console.enabled=true
+spring.h2.console.path=/h2-console
+CorsDemoApplication.java (seeds one Note so that id 1 exists)
+package com.example.corsdemo;
+import com.example.corsdemo.model.Note;
+import com.example.corsdemo.repository.NoteRepository;
+import org.springframework.boot.CommandLineRunner;
+import org.springframework.boot.SpringApplication;
+import org.springframework.boot.autoconfigure.SpringBootApplication;
+import org.springframework.context.annotation.Bean;
+@SpringBootApplication
+public class CorsDemoApplication {
+ public static void main(String[] args) {
+ SpringApplication.run(CorsDemoApplication.class, args);
+ }
+ @Bean
+ CommandLineRunner seedData(NoteRepository repository) {
+ return args -> repository.save(new Note("Sample note"));
+ }
+}
+model/Note.java and repository/NoteRepository.java
+package com.example.corsdemo.model;
+Practical No. 20 - CORS Configuration for Secured REST APIs Page 3
+import jakarta.persistence.Entity;
+import jakarta.persistence.GeneratedValue;
+import jakarta.persistence.GenerationType;
+import jakarta.persistence.Id;
+@Entity
+public class Note {
+ @Id
+ @GeneratedValue(strategy = GenerationType.IDENTITY)
+ private Long id;
+ private String text;
+ public Note() { }
+ public Note(String text) { this.text = text; }
+ public Long getId() { return id; }
+ public void setId(Long id) { this.id = id; }
+ public String getText() { return text; }
+ public void setText(String text) { this.text = text; }
+}
+// ---------------------------------------------------------------------
+package com.example.corsdemo.repository;
+import com.example.corsdemo.model.Note;
+import org.springframework.data.jpa.repository.JpaRepository;
+public interface NoteRepository extends JpaRepository<Note, Long> {
+}
+Step 1: config/CorsConfig.java
+package com.example.corsdemo.config;
+import org.springframework.context.annotation.Configuration;
+import org.springframework.web.servlet.config.annotation.CorsRegistry;
+import org.springframework.web.servlet.config.annotation.WebMvcConfigurer;
+@Configuration
+public class CorsConfig implements WebMvcConfigurer {
+ @Override
+ public void addCorsMappings(CorsRegistry registry) {
+ registry.addMapping("/api/**")
+ .allowedOrigins("http://localhost:3000") // the sample frontend only
+ .allowedMethods("GET", "POST", "PUT", "DELETE")
+ .allowedHeaders("Authorization", "Content-Type") // Basic Auth + JSON
+ .allowCredentials(true) // Authorization header allowed
+ .maxAge(3600); // browser may cache preflight 1 h
+ }
+}
+Step 2: config/SecurityConfig.java (.cors enabled)
+package com.example.corsdemo.config;
+import org.springframework.boot.autoconfigure.security.servlet.PathRequest;
+import org.springframework.context.annotation.Bean;
+import org.springframework.context.annotation.Configuration;
+import org.springframework.security.config.Customizer;
+import org.springframework.security.config.annotation.web.builders.HttpSecurity;
+import org.springframework.security.config.annotation.web.configuration.EnableWebSecurity;
+import org.springframework.security.core.userdetails.User;
+import org.springframework.security.core.userdetails.UserDetails;
+import org.springframework.security.crypto.bcrypt.BCryptPasswordEncoder;
+import org.springframework.security.crypto.password.PasswordEncoder;
+import org.springframework.security.provisioning.InMemoryUserDetailsManager;
+import org.springframework.security.web.SecurityFilterChain;
+Practical No. 20 - CORS Configuration for Secured REST APIs Page 4
+@Configuration
+@EnableWebSecurity
+public class SecurityConfig {
+ @Bean
+ public PasswordEncoder passwordEncoder() {
+ return new BCryptPasswordEncoder();
+ }
+ // username: user / password: password123 / role: USER
+ @Bean
+ public InMemoryUserDetailsManager userDetailsService(PasswordEncoder encoder) {
+ UserDetails user = User.withUsername("user")
+ .password(encoder.encode("password123"))
+ .roles("USER")
+ .build();
+ return new InMemoryUserDetailsManager(user);
+ }
+ @Bean
+ public SecurityFilterChain filterChain(HttpSecurity http) throws Exception {
+ http
+ // Step 2: run Spring's CorsFilter at the START of the security chain and read the
+ // rules from CorsConfig. It answers preflight OPTIONS requests itself, BEFORE
+ // authentication, so the credential-less preflight is not rejected with 401.
+ .cors(Customizer.withDefaults())
+ .csrf(csrf -> csrf.disable()) // stateless REST API + Basic Auth
+ .authorizeHttpRequests(auth -> auth
+ .requestMatchers(PathRequest.toH2Console()).permitAll() // dev only
+ .requestMatchers("/api/**").authenticated()
+ .anyRequest().authenticated()
+ )
+ .httpBasic(Customizer.withDefaults())
+ .headers(h -> h.frameOptions(f -> f.sameOrigin())); // for H2 console frames
+ return http.build();
+ }
+}
+controller/SecureNoteController.java
+package com.example.corsdemo.controller;
+import com.example.corsdemo.model.Note;
+import com.example.corsdemo.repository.NoteRepository;
+import java.util.List;
+import org.springframework.http.HttpStatus;
+import org.springframework.http.ResponseEntity;
+import org.springframework.web.bind.annotation.*;
+@RestController
+@RequestMapping("/api/secure/data")
+public class SecureNoteController {
+ private final NoteRepository repository;
+ public SecureNoteController(NoteRepository repository) {
+ this.repository = repository;
+ }
+ @GetMapping // 200 OK
+ public List<Note> getAll() {
+ return repository.findAll();
+ }
+ @PostMapping // 201 Created
+ public ResponseEntity<Note> create(@RequestBody Note note) {
+ note.setId(null);
+ return ResponseEntity.status(HttpStatus.CREATED).body(repository.save(note));
+ }
+ @PutMapping("/{id}") // 200 OK (404 if not found)
+ public ResponseEntity<Note> update(@PathVariable Long id, @RequestBody Note updated) {
+ return repository.findById(id)
+Practical No. 20 - CORS Configuration for Secured REST APIs Page 5
+ .map(existing -> {
+ existing.setText(updated.getText());
+ return ResponseEntity.ok(repository.save(existing));
+ })
+ .orElse(ResponseEntity.notFound().build());
+ }
+ @DeleteMapping("/{id}") // 204 No Content (404 if not found)
+ public ResponseEntity<Void> delete(@PathVariable Long id) {
+ if (!repository.existsById(id)) {
+ return ResponseEntity.notFound().build();
+ }
+ repository.deleteById(id);
+ return ResponseEntity.noContent().build();
+ }
+}
+Step 3 (Postman): Run the Application
+cd cors-demo
+mvn clean spring-boot:run # API on http://localhost:8080
+# Basic Auth credentials: user / password123
+In Postman add the header Origin: http://localhost:3000 (Headers tab) to a request with
+Authorization -> Basic Auth. Postman itself never blocks anything; the header only makes the server
+behave as it would for a browser call. Read the result in the response Headers tab.
+Steps 3 to 6: Postman API Testing
+# Method Endpoint Headers / Auth / Body Expected Response
+1 OPTIONS
+(preflight)
+/api/secure/data Origin: http://localhost:3000
+Access-Control-Request-Method:
+POST
+Access-Control-Request-Headers:
+authorization,content-type
+No auth
+200 OK with
+Access-Control-Allow-Origin:
+http://localhost:3000, Allow-Methods
+(GET,POST,PUT,DELETE),
+Allow-Headers, Allow-Credentials,
+Max-Age
+2 GET /api/secure/data Origin: http://localhost:3000 + Basic
+Auth
+200 OK with
+Access-Control-Allow-Origin:
+http://localhost:3000 present
+3 POST /api/secure/data Origin: http://localhost:3000 + Basic
+Auth + {"text":"Note"}
+201 Created with
+Access-Control-Allow-Origin present
+4 PUT /api/secure/data/1 Origin: http://localhost:3000 + Basic
+Auth + {"text":"Updated"}
+200 OK with
+Access-Control-Allow-Origin present
+5 DELETE /api/secure/data/1 Origin: http://localhost:3000 + Basic
+Auth
+204 No Content with
+Access-Control-Allow-Origin present
+6 GET /api/secure/data Origin: http://evil.com + Basic Auth 403 with body "Invalid CORS
+request";
+Access-Control-Allow-Origin absent
+(a browser would block it too)
+7 OPTIONS
+(preflight)
+/api/secure/data Origin: http://evil.com
+Access-Control-Request-Method:
+DELETE
+403 "Invalid CORS request"; no
+Access-Control-* headers
+8 GET /api/secure/data Origin: http://localhost:3000, no auth 401 Unauthorized (still carries
+Access-Control-Allow-Origin, so the
+frontend can read the 401)
+9 GET /api/secure/data No Origin header + Basic Auth (plain
+Postman call)
+200 OK, no Access-Control-*
+headers (not needed)
+Run row 5 (DELETE) last so that note 1 still exists for row 4.
+Practical No. 20 - CORS Configuration for Secured REST APIs Page 6
+Real browser test: frontend/index.html (optional but recommended)
+<!DOCTYPE html>
+<html>
+<head><meta charset="UTF-8"><title>CORS Demo Frontend</title></head>
+<body>
+ <h3>CORS demo - page origin: <span id="origin"></span></h3>
+ <button onclick="call('GET')">GET all</button>
+ <button onclick="call('POST', null, {text:'Note'})">POST</button>
+ <button onclick="call('PUT', 1, {text:'Updated'})">PUT /1</button>
+ <button onclick="call('DELETE', 1)">DELETE /1</button>
+ <pre id="out"></pre>
+ <script>
+ const API = "http://localhost:8080/api/secure/data";
+ const AUTH = "Basic " + btoa("user:password123");
+ document.getElementById("origin").textContent = location.origin;
+ async function call(method, id, body) {
+ const out = document.getElementById("out");
+ try {
+ const res = await fetch(id ? API + "/" + id : API, {
+ method: method,
+ headers: { "Authorization": AUTH, "Content-Type": "application/json" },
+ body: body ? JSON.stringify(body) : undefined
+ });
+ out.textContent = method + " -> HTTP " + res.status + "\n" + await res.text();
+ } catch (e) {
+ out.textContent = method + " -> BLOCKED by the browser: " + e +
+ "\n(see the console for the CORS message)";
+ }
+ }
+ </script>
+</body>
+</html>
+cd frontend
+python -m http.server 3000 # allowed origin -> open http://localhost:3000: all 4 buttons work
+python -m http.server 3001 # NOT allowed -> open http://localhost:3001: buttons say BLOCKED
+ # console: "blocked by CORS policy: No 'Access-Control-Allow-Origin'"
+# Use python3 on Linux/macOS. Press F12 -> Network tab to see the OPTIONS preflight.
+Step 7: Same-origin Postman call vs cross-origin browser call
+Plain Postman / cURL call Cross-origin call from a browser (or Postman with
+Origin header)
+Who enforces the
+rule
+Nobody: Postman is not a browser
+and has no same-origin policy.
+The browser blocks JavaScript from reading the response
+unless the server allows the origin. Spring adds its own
+server-side check (403 for unlisted origins).
+Origin header Not sent (or irrelevant). Sent automatically by the browser: Origin:
+http://localhost:3000.
+CORS response
+headers
+Not needed; the response is always
+readable.
+Required. Without Access-Control-Allow-Origin the browser
+hides the response from the script.
+Preflight OPTIONS Never sent. Sent first for PUT/DELETE and for requests with an
+Authorization header or JSON body; must return
+Access-Control-Allow-* headers without needing
+credentials.
+Result for evil.com Request succeeds if the credentials
+are right.
+Blocked: no Allow-Origin header (and Spring returns 403
+Invalid CORS request).
+Simulated cross-origin call: adding Origin: http://localhost:3000 in Postman does not make
+Postman enforce anything; it only makes the server produce the same CORS headers it would give a
+browser, which lets you verify them. Origin: http://localhost:8080 (same as the API itself) is
+treated as same-origin, so no CORS headers appear.
+Practical No. 20 - CORS Configuration for Secured REST APIs Page 7
+Optional cURL cross-check
+# preflight (no credentials)
+curl -i -X OPTIONS http://localhost:8080/api/secure/data \
+ -H "Origin: http://localhost:3000" -H "Access-Control-Request-Method: POST" \
+ -H "Access-Control-Request-Headers: authorization,content-type"
+# allowed origin -> 200 + Access-Control-Allow-Origin
+curl -i -u user:password123 -H "Origin: http://localhost:3000" \
+ http://localhost:8080/api/secure/data
+# disallowed origin -> 403 Invalid CORS request
+curl -i -u user:password123 -H "Origin: http://evil.com" http://localhost:8080/api/secure/data
+Key Points to Remember
+• CORS is enforced by browsers, not by the API. It stops other websites' scripts from reading your API
+responses with the user's browser; it does not replace authentication, and cURL/Postman ignore it.
+• Why .cors() is needed: without it the preflight OPTIONS request (which carries no Authorization
+header) reaches the authorization rules and gets 401, so the browser never sends the real request.
+.cors(Customizer.withDefaults()) makes Spring Security use the rules from CorsConfig.
+• Never combine allowedOrigins("*") with allowCredentials(true). Spring rejects it; list exact origins
+(or use allowedOriginPatterns carefully). Origins must match scheme, host and port exactly.
+• allowedHeaders must include Authorization because the frontend sends Basic Auth in that header;
+Content-Type is needed for JSON bodies.
+• Alternative: define a CorsConfigurationSource bean in SecurityConfig instead of CorsConfig;
+.cors(Customizer.withDefaults()) picks that bean up automatically.
+• Per-controller option: @CrossOrigin(origins = "http://localhost:3000") on a class or method, but the
+global CorsConfig is easier to audit.
+• In production replace localhost:3000 with the real HTTPS frontend origin, ideally from configuration.
+Conclusion
+CORS was configured globally for /api/** to allow only http://localhost:3000 for GET, POST, PUT and
+DELETE, and enabled in Spring Security so preflight requests succeed before authentication. Postman
+tests with an Origin header show the Access-Control-Allow-Origin header for the allowed origin on all four
+verbs, and its absence (with a 403) for a disallowed origin.
