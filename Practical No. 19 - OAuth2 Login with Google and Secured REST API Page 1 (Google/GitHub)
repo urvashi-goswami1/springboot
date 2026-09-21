@@ -1,0 +1,423 @@
+Practical No. 19 - OAuth2 Login with Google and Secured REST API Page 1
+Practical No. 19
+OAuth2 Login with Google and Accessing a Secured REST API
+Spring Boot 3 + Maven + H2 Database + Spring Data JPA + OAuth2 Client
+Objective
+To implement the OAuth2 Authorization Code grant with Google using Spring Security's OAuth2 Client
+support, log in through the browser, and call secured REST endpoints (profile and full CRUD on per-user
+Notes stored in H2) with the token obtained through Postman's OAuth 2.0 authorization feature.
+Design note (why this project also has a JWT decoder): oauth2Login on its own creates a browser session
+and does not accept Bearer tokens. Your Postman steps 7 and 8 send a token, so the same application is also
+configured as a resource server. Google's access token is opaque and cannot be verified locally, but Google's
+ID token is a signed JWT. Therefore Postman must send the ID token (Postman option: Use Token Type -> ID
+Token), and the API verifies its signature, issuer and audience (must equal your Client ID).
+How it works
+ Browser flow (steps 5-6) Postman flow (steps 7-8)
+ ------------------------ ------------------------
+ /oauth2/authorization/google Get New Access Token (Authorization Code)
+ | |
+ v v
+ Google login + consent --code--> Spring Boot Google login + consent --code--> Postman
+ | (/login/oauth2/code/google) | Postman calls the Token URL and
+ v v receives access_token + id_token
+ Session cookie (JSESSIONID) GET /api/user/profile
+ -> /api/user/profile Authorization: Bearer <ID token (JWT)>
+ |
+ Spring Boot verifies the JWT with Google's
+ public keys, then runs the controller
+Project Structure
+oauth-login-demo/
+ |-- pom.xml
+ `-- src/main/
+ |-- java/com/example/oauthlogin/
+ | |-- OAuthLoginDemoApplication.java
+ | |-- config/SecurityConfig.java
+ | |-- model/Note.java
+ | |-- repository/NoteRepository.java
+ | `-- controller/
+ | |-- UserInfoController.java GET /api/user/profile
+ | `-- NoteController.java GET/POST/PUT/DELETE /api/user/notes
+ `-- resources/application.properties (Google client registration = "OAuth2ClientConfig")
+Step 1: Register the application in Google Cloud Console
+• Go to console.cloud.google.com, create a project (e.g. oauth-login-demo).
+• APIs & Services -> OAuth consent screen: User type External, fill the app name and your email. While
+the app is in Testing status, add your own Google account under Test users (only listed accounts can
+log in).
+• APIs & Services -> Credentials -> Create Credentials -> OAuth client ID -> Application type: Web
+application.
+• Authorized redirect URIs (add both): http://localhost:8080/login/oauth2/code/google
+(Spring Boot, browser login) and https://oauth.pstmn.io/v1/callback (Postman; use exactly
+the Callback URL that Postman displays).
+• Create, then copy the Client ID and Client secret.
+Practical No. 19 - OAuth2 Login with Google and Secured REST API Page 2
+Step 2: pom.xml (Maven)
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+ xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+ xsi:schemaLocation="http://maven.apache.org/POM/4.0.0
+ https://maven.apache.org/xsd/maven-4.0.0.xsd">
+ <modelVersion>4.0.0</modelVersion>
+ <parent>
+ <groupId>org.springframework.boot</groupId>
+ <artifactId>spring-boot-starter-parent</artifactId>
+ <version>3.3.5</version>
+ <relativePath/>
+ </parent>
+ <groupId>com.example</groupId>
+ <artifactId>oauth-login-demo</artifactId>
+ <version>0.0.1-SNAPSHOT</version>
+ <name>oauth-login-demo</name>
+ <properties>
+ <java.version>17</java.version>
+ </properties>
+ <dependencies>
+ <dependency>
+ <groupId>org.springframework.boot</groupId>
+ <artifactId>spring-boot-starter-web</artifactId>
+ </dependency>
+ <!-- Step 2: OAuth2 login (Authorization Code flow, browser session) -->
+ <dependency>
+ <groupId>org.springframework.boot</groupId>
+ <artifactId>spring-boot-starter-oauth2-client</artifactId>
+ </dependency>
+ <!-- Lets the API also accept "Authorization: Bearer <JWT>" (Postman steps 7-8) -->
+ <dependency>
+ <groupId>org.springframework.boot</groupId>
+ <artifactId>spring-boot-starter-oauth2-resource-server</artifactId>
+ </dependency>
+ <dependency>
+ <groupId>org.springframework.boot</groupId>
+ <artifactId>spring-boot-starter-data-jpa</artifactId>
+ </dependency>
+ <dependency>
+ <groupId>com.h2database</groupId>
+ <artifactId>h2</artifactId>
+ <scope>runtime</scope>
+ </dependency>
+ <dependency>
+ <groupId>org.springframework.boot</groupId>
+ <artifactId>spring-boot-starter-test</artifactId>
+ <scope>test</scope>
+ </dependency>
+ </dependencies>
+ <build>
+ <plugins>
+ <plugin>
+ <groupId>org.springframework.boot</groupId>
+ <artifactId>spring-boot-maven-plugin</artifactId>
+ </plugin>
+ </plugins>
+ </build>
+</project>
+Step 3: application.properties (client registration)
+spring.application.name=oauth-login-demo
+# Google client registration. Values come from environment variables so the secret is never
+# committed to Git. (For a quick lab test you may paste the values here, but do not push them.)
+spring.security.oauth2.client.registration.google.client-id=${GOOGLE_CLIENT_ID}
+Practical No. 19 - OAuth2 Login with Google and Secured REST API Page 3
+spring.security.oauth2.client.registration.google.client-secret=${GOOGLE_CLIENT_SECRET}
+spring.security.oauth2.client.registration.google.scope=openid,profile,email
+# redirect-uri defaults to {baseUrl}/login/oauth2/code/google, matching Step 1
+# H2 in-memory database
+spring.datasource.url=jdbc:h2:mem:notesdb
+spring.datasource.driver-class-name=org.h2.Driver
+spring.datasource.username=sa
+spring.datasource.password=
+spring.jpa.hibernate.ddl-auto=create-drop
+spring.jpa.show-sql=true
+spring.jpa.database-platform=org.hibernate.dialect.H2Dialect
+# H2 web console -> http://localhost:8080/h2-console
+spring.h2.console.enabled=true
+spring.h2.console.path=/h2-console
+OAuthLoginDemoApplication.java
+package com.example.oauthlogin;
+import org.springframework.boot.SpringApplication;
+import org.springframework.boot.autoconfigure.SpringBootApplication;
+@SpringBootApplication
+public class OAuthLoginDemoApplication {
+ public static void main(String[] args) {
+ SpringApplication.run(OAuthLoginDemoApplication.class, args);
+ }
+}
+model/Note.java and repository/NoteRepository.java
+package com.example.oauthlogin.model;
+import jakarta.persistence.Entity;
+import jakarta.persistence.GeneratedValue;
+import jakarta.persistence.GenerationType;
+import jakarta.persistence.Id;
+@Entity
+public class Note {
+ @Id
+ @GeneratedValue(strategy = GenerationType.IDENTITY)
+ private Long id;
+ private String text;
+ private String owner; // Google user id ("sub") of the note's owner
+ public Note() { }
+ public Long getId() { return id; }
+ public void setId(Long id) { this.id = id; }
+ public String getText() { return text; }
+ public void setText(String text) { this.text = text; }
+ public String getOwner() { return owner; }
+ public void setOwner(String owner) { this.owner = owner; }
+}
+// ---------------------------------------------------------------------
+package com.example.oauthlogin.repository;
+import com.example.oauthlogin.model.Note;
+import java.util.List;
+import java.util.Optional;
+import org.springframework.data.jpa.repository.JpaRepository;
+public interface NoteRepository extends JpaRepository<Note, Long> {
+Practical No. 19 - OAuth2 Login with Google and Secured REST API Page 4
+ List<Note> findByOwner(String owner);
+ Optional<Note> findByIdAndOwner(Long id, String owner);
+}
+config/SecurityConfig.java (OAuth2 login + Bearer JWT validation)
+package com.example.oauthlogin.config;
+import java.util.List;
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.boot.autoconfigure.security.servlet.PathRequest;
+import org.springframework.context.annotation.Bean;
+import org.springframework.context.annotation.Configuration;
+import org.springframework.http.HttpStatus;
+import org.springframework.security.config.Customizer;
+import org.springframework.security.config.annotation.web.builders.HttpSecurity;
+import org.springframework.security.config.annotation.web.configuration.EnableWebSecurity;
+import org.springframework.security.oauth2.core.DelegatingOAuth2TokenValidator;
+import org.springframework.security.oauth2.core.OAuth2TokenValidator;
+import org.springframework.security.oauth2.jwt.Jwt;
+import org.springframework.security.oauth2.jwt.JwtClaimValidator;
+import org.springframework.security.oauth2.jwt.JwtDecoder;
+import org.springframework.security.oauth2.jwt.JwtValidators;
+import org.springframework.security.oauth2.jwt.NimbusJwtDecoder;
+import org.springframework.security.web.SecurityFilterChain;
+import org.springframework.security.web.authentication.HttpStatusEntryPoint;
+import org.springframework.security.web.util.matcher.AntPathRequestMatcher;
+@Configuration
+@EnableWebSecurity
+public class SecurityConfig {
+ @Bean
+ public SecurityFilterChain filterChain(HttpSecurity http) throws Exception {
+ http
+ // CSRF stays ON for browser-session requests. Requests carrying a Bearer token are
+ // exempt automatically (resource-server support); only the H2 console is excluded.
+ .csrf(csrf -> csrf.ignoringRequestMatchers(PathRequest.toH2Console()))
+ .authorizeHttpRequests(auth -> auth
+ .requestMatchers("/error").permitAll()
+ .requestMatchers(PathRequest.toH2Console()).permitAll() // dev only
+ .anyRequest().authenticated()
+ )
+ // Step 5: browser login via Google; after login land on the profile endpoint
+ .oauth2Login(oauth -> oauth.defaultSuccessUrl("/api/user/profile", true))
+ // Steps 7-8: accept "Authorization: Bearer <Google ID token>"
+ .oauth2ResourceServer(rs -> rs.jwt(Customizer.withDefaults()))
+ // API clients such as Postman get 401 JSON-style responses, not a redirect to Google
+ .exceptionHandling(ex -> ex.defaultAuthenticationEntryPointFor(
+ new HttpStatusEntryPoint(HttpStatus.UNAUTHORIZED),
+ new AntPathRequestMatcher("/api/**")))
+ .headers(h -> h.frameOptions(f -> f.sameOrigin())); // for H2 console frames
+ return http.build();
+ }
+ // Verifies Google ID tokens: signature (Google's public keys), issuer, expiry and audience
+ @Bean
+ public JwtDecoder jwtDecoder(
+ @Value("${spring.security.oauth2.client.registration.google.client-id}")
+ String clientId) {
+ NimbusJwtDecoder decoder = NimbusJwtDecoder
+ .withJwkSetUri("https://www.googleapis.com/oauth2/v3/certs")
+ .build();
+ OAuth2TokenValidator<Jwt> issuerAndExpiry =
+ JwtValidators.createDefaultWithIssuer("https://accounts.google.com");
+ // reject tokens that Google issued for some OTHER application
+ OAuth2TokenValidator<Jwt> audience = new JwtClaimValidator<List<String>>(
+ "aud", aud -> aud != null && aud.contains(clientId));
+ decoder.setJwtValidator(new DelegatingOAuth2TokenValidator<>(issuerAndExpiry, audience));
+ return decoder;
+Practical No. 19 - OAuth2 Login with Google and Secured REST API Page 5
+ }
+}
+Step 4: controller/UserInfoController.java
+package com.example.oauthlogin.controller;
+import java.util.LinkedHashMap;
+import java.util.Map;
+import org.springframework.security.core.Authentication;
+import org.springframework.security.oauth2.core.user.OAuth2User;
+import org.springframework.security.oauth2.jwt.Jwt;
+import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.RequestMapping;
+import org.springframework.web.bind.annotation.RestController;
+@RestController
+@RequestMapping("/api/user")
+public class UserInfoController {
+ // GET /api/user/profile -> 200 OK {"name": "...", "email": "...", "authenticatedVia": "..."}
+ // Works for both kinds of caller:
+ // - browser session after Google login: principal is an OAuth2User
+ // - Postman with a Bearer ID token: principal is a Jwt
+ @GetMapping("/profile")
+ public Map<String, Object> getUserProfile(Authentication authentication) {
+ Object principal = authentication.getPrincipal();
+ Map<String, Object> attributes;
+ String via;
+ if (principal instanceof OAuth2User oauth2User) {
+ attributes = oauth2User.getAttributes();
+ via = "OAuth2 login session";
+ } else if (principal instanceof Jwt jwt) {
+ attributes = jwt.getClaims();
+ via = "Bearer token";
+ } else {
+ attributes = Map.of();
+ via = "unknown";
+ }
+ Map<String, Object> profile = new LinkedHashMap<>();
+ profile.put("name", attributes.get("name"));
+ profile.put("email", attributes.get("email"));
+ profile.put("authenticatedVia", via);
+ return profile;
+ }
+}
+Step 6: controller/NoteController.java (per-user CRUD)
+package com.example.oauthlogin.controller;
+import com.example.oauthlogin.model.Note;
+import com.example.oauthlogin.repository.NoteRepository;
+import java.util.List;
+import org.springframework.http.HttpStatus;
+import org.springframework.http.ResponseEntity;
+import org.springframework.security.core.Authentication;
+import org.springframework.web.bind.annotation.*;
+@RestController
+@RequestMapping("/api/user/notes")
+public class NoteController {
+ private final NoteRepository repository;
+ public NoteController(NoteRepository repository) {
+ this.repository = repository;
+ }
+ // authentication.getName() is the Google user id ("sub") for both session and Bearer callers
+ // GET /api/user/notes -> 200 OK (only the caller's own notes)
+Practical No. 19 - OAuth2 Login with Google and Secured REST API Page 6
+ @GetMapping
+ public List<Note> list(Authentication authentication) {
+ return repository.findByOwner(authentication.getName());
+ }
+ // POST /api/user/notes -> 201 Created
+ @PostMapping
+ public ResponseEntity<Note> create(Authentication authentication, @RequestBody Note note) {
+ note.setId(null); // force INSERT
+ note.setOwner(authentication.getName()); // owner always comes from the login
+ return ResponseEntity.status(HttpStatus.CREATED).body(repository.save(note));
+ }
+ // PUT /api/user/notes/{id} -> 200 OK (404 if it does not exist or belongs to someone else)
+ @PutMapping("/{id}")
+ public ResponseEntity<Note> update(Authentication authentication, @PathVariable Long id,
+ @RequestBody Note updated) {
+ return repository.findByIdAndOwner(id, authentication.getName())
+ .map(existing -> {
+ existing.setText(updated.getText());
+ return ResponseEntity.ok(repository.save(existing));
+ })
+ .orElse(ResponseEntity.notFound().build());
+ }
+ // DELETE /api/user/notes/{id} -> 204 No Content (404 if not found / not yours)
+ @DeleteMapping("/{id}")
+ public ResponseEntity<Void> delete(Authentication authentication, @PathVariable Long id) {
+ return repository.findByIdAndOwner(id, authentication.getName())
+ .map(existing -> {
+ repository.delete(existing);
+ return ResponseEntity.noContent().<Void>build();
+ })
+ .orElse(ResponseEntity.notFound().build());
+ }
+}
+Step 5: Run and log in through the browser
+# Windows (cmd): set GOOGLE_CLIENT_ID=xxxx.apps.googleusercontent.com
+# set GOOGLE_CLIENT_SECRET=xxxx
+# Windows (PowerShell): $env:GOOGLE_CLIENT_ID="xxxx.apps.googleusercontent.com"
+# Linux / macOS: export GOOGLE_CLIENT_ID=xxxx.apps.googleusercontent.com
+# export GOOGLE_CLIENT_SECRET=xxxx
+cd oauth-login-demo
+mvn clean spring-boot:run
+• Browse to http://localhost:8080/oauth2/authorization/google.
+• Log in with a Test user account and accept the consent screen.
+• You are redirected to /api/user/profile and see JSON with your name, email and
+"authenticatedVia": "OAuth2 login session". This confirms the authenticated session.
+Step 7: Postman - Get New Access Token
+Create a new request and open Authorization -> Type: OAuth 2.0. Enter:
+Field Value
+Grant Type Authorization Code
+Callback URL https://oauth.pstmn.io/v1/callback (tick Authorize using browser)
+Auth URL https://accounts.google.com/o/oauth2/v2/auth
+Access Token URL https://oauth2.googleapis.com/token
+Client ID / Client Secret from Step 1
+Scope openid profile email
+Practical No. 19 - OAuth2 Login with Google and Secured REST API Page 7
+Client Authentication Send client credentials in body
+• Click Get New Access Token, log in to Google in the browser window that opens and accept consent.
+• On the Manage Access Tokens screen, Postman shows both the access_token and the id_token.
+• Under Use Token Type choose ID Token, then click Use Token. (Google's access token starts with
+ya29. and is opaque; the API can only verify the ID token, which is a JWT.)
+• Postman now sends Authorization: Bearer <ID token> with the request.
+Steps 7 and 8: Postman API Testing
+Use the same OAuth 2.0 configuration on every request below. For POST/PUT set Body -> raw -> JSON.
+Because the notes table is empty at startup, run the POST first so that it receives id 1.
+# Method Endpoint Authorization / Body Expected Response
+1 - Authorization tab -> Get
+New Access Token
+Auth URL, Token URL, Client
+ID/Secret, Callback URL, Scope
+Access token and ID token
+retrieved and stored by Postman
+2 GET /api/user/profile No token 401 Unauthorized
+3 GET /api/user/profile Bearer <ID token from Postman
+OAuth2>
+200 OK - JSON with
+authenticated user's name and
+email
+4 POST /api/user/notes Bearer <token> + {"text":"Follow up
+with client"}
+201 Created - note saved for the
+authenticated user
+5 PUT /api/user/notes/1 Bearer <token> + {"text":"Follow up
+with client tomorrow"}
+200 OK - note updated
+6 GET /api/user/notes Bearer <token> 200 OK - your notes only
+7 DELETE /api/user/notes/1 Bearer <token> 204 No Content - note removed
+8 PUT /
+DELETE
+/api/user/notes/1 (already
+deleted or another user's)
+Bearer <token> 404 Not Found
+9 any /api/user/** Expired or altered token 401 Unauthorized -
+WWW-Authenticate: Bearer
+error="invalid_token"
+"Only while the token is valid": a Google ID token expires after about one hour. After that, every call
+returns 401 (row 9) until you click Get New Access Token again.
+Optional cURL cross-check (after copying the ID token from Postman)
+ID_TOKEN=eyJhbGciOi...
+curl -i http://localhost:8080/api/user/profile # 401
+curl -i -H "Authorization: Bearer $ID_TOKEN" http://localhost:8080/api/user/profile # 200
+curl -i -H "Authorization: Bearer $ID_TOKEN" -X POST http://localhost:8080/api/user/notes \
+ -H "Content-Type: application/json" -d '{"text":"Follow up with client"}' # 201
+curl -i -H "Authorization: Bearer $ID_TOKEN" -X DELETE \
+ http://localhost:8080/api/user/notes/1 # 204
+Key Points to Remember
+• Two authentication styles in one app: browser = oauth2Login + session cookie; API client = Bearer
+ID token verified as a JWT. Both end in the same controllers through the Authentication object.
+• @AuthenticationPrincipal OAuth2User (as in your class diagram) works only for the browser session.
+For a Bearer call the principal is a Jwt, so the controller reads the generic Authentication instead.
+• Authorization Code flow: the user logs in at Google (the app never sees the password); Google
+returns a one-time code to the redirect URI; the client exchanges it (with the client secret) at the Token
+URL for tokens.
+Practical No. 19 - OAuth2 Login with Google and Secured REST API Page 8
+• redirect_uri_mismatch error means the URI sent by the client is not listed exactly in Google Console
+(check http vs https, port, path).
+• Access denied / app not verified: add your account under Test users on the OAuth consent screen.
+• Audience check: without it, an ID token Google issued to a different application would be accepted
+here.
+• GitHub instead of Google: register the app under GitHub Developer Settings (redirect
+http://localhost:8080/login/oauth2/code/github) and use the registration name github.
+GitHub has no ID token, so its opaque access token could not be checked with a JWT decoder; the API
+would need a custom OpaqueTokenIntrospector that calls https://api.github.com/user.
+• Never commit the client secret; use environment variables, and use HTTPS outside local testing.
+Conclusion
+The application implements the OAuth2 Authorization Code flow with Google for browser login and also
+verifies Google-issued ID tokens sent as Bearer tokens. An authenticated user can read their profile and
+create, update and delete their own Notes in H2, while missing, expired or altered tokens are rejected with
+401.
