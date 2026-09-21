@@ -1,0 +1,418 @@
+Practical No. 18 - OAuth2 Resource Server with JWT Page 1
+Practical No. 18
+Securing REST API as an OAuth2 Resource Server with JWT
+Spring Boot 3 + Maven + H2 Database + Spring Data JPA + OAuth2 Resource Server
+Objective
+To configure the Spring Boot application as an OAuth2 Resource Server that validates JSON Web Tokens
+(JWT) issued by an Authorization Server, so that REST endpoints succeed only when the request carries
+a valid Bearer token with the required scope (read for GET, write for POST/PUT/DELETE). Notes are
+stored in H2.
+How it works
+ Postman (client) Authorization Server (Keycloak)
+ | |
+ | 1. POST /token (client credentials) -------->|
+ |<-------- 2. JWT access token (has scope) ----|
+ | |
+ | 3. GET /api/secure/data |
+ | Authorization: Bearer <JWT> |
+ v |
+ Spring Boot Resource Server (this project) |
+ | 4. fetch public keys (JWKS), then cache ---->|
+ | 5. validate signature, issuer and expiry
+ | 6. map "scope" claim to SCOPE_read, SCOPE_write
+ v
+ 200 OK / 401 Unauthorized / 403 Forbidden
+Project Structure
+jwt-resource-server-demo/
+ |-- pom.xml
+ `-- src/main/
+ |-- java/com/example/jwtdemo/
+ | |-- JwtResourceServerDemoApplication.java (seeds one Note)
+ | |-- config/ResourceServerConfig.java
+ | |-- config/DevJwtConfig.java (Option B only, profile "dev")
+ | |-- model/Note.java
+ | |-- repository/NoteRepository.java
+ | `-- controller/
+ | |-- SecureDataController.java
+ | `-- DevTokenController.java (Option B only, profile "dev")
+ `-- resources/application.properties
+Step 1: pom.xml (Maven)
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+ xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+ xsi:schemaLocation="http://maven.apache.org/POM/4.0.0
+ https://maven.apache.org/xsd/maven-4.0.0.xsd">
+ <modelVersion>4.0.0</modelVersion>
+ <parent>
+ <groupId>org.springframework.boot</groupId>
+ <artifactId>spring-boot-starter-parent</artifactId>
+ <version>3.3.5</version>
+ <relativePath/>
+ </parent>
+ <groupId>com.example</groupId>
+ <artifactId>jwt-resource-server-demo</artifactId>
+ <version>0.0.1-SNAPSHOT</version>
+ <name>jwt-resource-server-demo</name>
+ <properties>
+Practical No. 18 - OAuth2 Resource Server with JWT Page 2
+ <java.version>17</java.version>
+ </properties>
+ <dependencies>
+ <dependency>
+ <groupId>org.springframework.boot</groupId>
+ <artifactId>spring-boot-starter-web</artifactId>
+ </dependency>
+ <!-- Step 1: OAuth2 Resource Server (also brings Spring Security + Nimbus JOSE JWT) -->
+ <dependency>
+ <groupId>org.springframework.boot</groupId>
+ <artifactId>spring-boot-starter-oauth2-resource-server</artifactId>
+ </dependency>
+ <dependency>
+ <groupId>org.springframework.boot</groupId>
+ <artifactId>spring-boot-starter-data-jpa</artifactId>
+ </dependency>
+ <dependency>
+ <groupId>com.h2database</groupId>
+ <artifactId>h2</artifactId>
+ <scope>runtime</scope>
+ </dependency>
+ <dependency>
+ <groupId>org.springframework.boot</groupId>
+ <artifactId>spring-boot-starter-test</artifactId>
+ <scope>test</scope>
+ </dependency>
+ </dependencies>
+ <build>
+ <plugins>
+ <plugin>
+ <groupId>org.springframework.boot</groupId>
+ <artifactId>spring-boot-maven-plugin</artifactId>
+ </plugin>
+ </plugins>
+ </build>
+</project>
+Step 2: application.properties
+spring.application.name=jwt-resource-server-demo
+# Step 2: where the Authorization Server (Keycloak) publishes its metadata and public keys.
+# The "iss" claim inside every token must match this value EXACTLY.
+spring.security.oauth2.resourceserver.jwt.issuer-uri=http://localhost:8180/realms/demo-realm
+# Alternative to issuer-uri: point directly at the key set (JWKS) endpoint
+# spring.security.oauth2.resourceserver.jwt.jwk-set-uri
+# = http://localhost:8180/realms/demo-realm/protocol/openid-connect/certs
+# H2 in-memory database
+spring.datasource.url=jdbc:h2:mem:notesdb
+spring.datasource.driver-class-name=org.h2.Driver
+spring.datasource.username=sa
+spring.datasource.password=
+spring.jpa.hibernate.ddl-auto=create-drop
+spring.jpa.show-sql=true
+spring.jpa.database-platform=org.hibernate.dialect.H2Dialect
+# H2 web console -> http://localhost:8080/h2-console
+spring.h2.console.enabled=true
+spring.h2.console.path=/h2-console
+JwtResourceServerDemoApplication.java
+package com.example.jwtdemo;
+import com.example.jwtdemo.model.Note;
+import com.example.jwtdemo.repository.NoteRepository;
+import org.springframework.boot.CommandLineRunner;
+import org.springframework.boot.SpringApplication;
+Practical No. 18 - OAuth2 Resource Server with JWT Page 3
+import org.springframework.boot.autoconfigure.SpringBootApplication;
+import org.springframework.context.annotation.Bean;
+@SpringBootApplication
+public class JwtResourceServerDemoApplication {
+ public static void main(String[] args) {
+ SpringApplication.run(JwtResourceServerDemoApplication.class, args);
+ }
+ // one sample note so that PUT / DELETE on /api/secure/data/1 can be tested
+ @Bean
+ CommandLineRunner seedData(NoteRepository repository) {
+ return args -> repository.save(new Note("Sample note"));
+ }
+}
+model/Note.java and repository/NoteRepository.java
+package com.example.jwtdemo.model;
+import jakarta.persistence.Entity;
+import jakarta.persistence.GeneratedValue;
+import jakarta.persistence.GenerationType;
+import jakarta.persistence.Id;
+@Entity
+public class Note {
+ @Id
+ @GeneratedValue(strategy = GenerationType.IDENTITY)
+ private Long id;
+ private String text;
+ public Note() { }
+ public Note(String text) { this.text = text; }
+ public Long getId() { return id; }
+ public void setId(Long id) { this.id = id; }
+ public String getText() { return text; }
+ public void setText(String text) { this.text = text; }
+}
+// ---------------------------------------------------------------------
+package com.example.jwtdemo.repository;
+import com.example.jwtdemo.model.Note;
+import org.springframework.data.jpa.repository.JpaRepository;
+public interface NoteRepository extends JpaRepository<Note, Long> {
+}
+Step 3: config/ResourceServerConfig.java
+package com.example.jwtdemo.config;
+import org.springframework.boot.autoconfigure.security.servlet.PathRequest;
+import org.springframework.context.annotation.Bean;
+import org.springframework.context.annotation.Configuration;
+import org.springframework.security.config.Customizer;
+import org.springframework.security.config.annotation.method.configuration.EnableMethodSecurity;
+import org.springframework.security.config.annotation.web.builders.HttpSecurity;
+import org.springframework.security.config.annotation.web.configuration.EnableWebSecurity;
+import org.springframework.security.config.http.SessionCreationPolicy;
+import org.springframework.security.web.SecurityFilterChain;
+@Configuration
+@EnableWebSecurity
+@EnableMethodSecurity // enables @PreAuthorize on the controller methods
+public class ResourceServerConfig {
+Practical No. 18 - OAuth2 Resource Server with JWT Page 4
+ @Bean
+ public SecurityFilterChain filterChain(HttpSecurity http) throws Exception {
+ http
+ .csrf(csrf -> csrf.disable()) // stateless API, no cookies, no CSRF risk
+ .sessionManagement(s -> s.sessionCreationPolicy(SessionCreationPolicy.STATELESS))
+ .authorizeHttpRequests(auth -> auth
+ .requestMatchers(PathRequest.toH2Console()).permitAll() // dev only
+ .requestMatchers("/dev/**").permitAll() // Option B only
+ .requestMatchers("/api/secure/**").authenticated()
+ .anyRequest().authenticated()
+ )
+ // validate incoming "Authorization: Bearer <JWT>" headers
+ .oauth2ResourceServer(oauth2 -> oauth2.jwt(Customizer.withDefaults()))
+ .headers(h -> h.frameOptions(f -> f.sameOrigin())); // for H2 console frames
+ return http.build();
+ }
+}
+Steps 5 and 6: controller/SecureDataController.java
+package com.example.jwtdemo.controller;
+import com.example.jwtdemo.model.Note;
+import com.example.jwtdemo.repository.NoteRepository;
+import java.util.List;
+import org.springframework.http.HttpStatus;
+import org.springframework.http.ResponseEntity;
+import org.springframework.security.access.prepost.PreAuthorize;
+import org.springframework.web.bind.annotation.*;
+@RestController
+@RequestMapping("/api/secure/data")
+public class SecureDataController {
+ private final NoteRepository repository;
+ public SecureDataController(NoteRepository repository) {
+ this.repository = repository;
+ }
+ // GET -> 200 OK (token must contain scope "read")
+ @GetMapping
+ @PreAuthorize("hasAuthority('SCOPE_read')")
+ public List<Note> getSecureData() {
+ return repository.findAll();
+ }
+ // POST -> 201 Created (scope "write")
+ @PostMapping
+ @PreAuthorize("hasAuthority('SCOPE_write')")
+ public ResponseEntity<Note> create(@RequestBody Note note) {
+ note.setId(null); // force INSERT
+ return ResponseEntity.status(HttpStatus.CREATED).body(repository.save(note));
+ }
+ // PUT -> 200 OK (404 if id not found) (scope "write")
+ @PutMapping("/{id}")
+ @PreAuthorize("hasAuthority('SCOPE_write')")
+ public ResponseEntity<Note> update(@PathVariable Long id, @RequestBody Note updated) {
+ return repository.findById(id)
+ .map(existing -> {
+ existing.setText(updated.getText());
+ return ResponseEntity.ok(repository.save(existing));
+ })
+ .orElse(ResponseEntity.notFound().build());
+ }
+ // DELETE -> 204 No Content (404 if id not found) (scope "write")
+ @DeleteMapping("/{id}")
+ @PreAuthorize("hasAuthority('SCOPE_write')")
+ public ResponseEntity<Void> delete(@PathVariable Long id) {
+ if (!repository.existsById(id)) {
+ return ResponseEntity.notFound().build();
+Practical No. 18 - OAuth2 Resource Server with JWT Page 5
+ }
+ repository.deleteById(id);
+ return ResponseEntity.noContent().build();
+ }
+}
+Step 4 (Option A): Obtaining a JWT from Keycloak
+Keycloak is a free, open-source Authorization Server. Start it with Docker (port 8180 so it does not clash
+with Spring Boot on 8080):
+docker run -p 8180:8080 -e KEYCLOAK_ADMIN=admin -e KEYCLOAK_ADMIN_PASSWORD=admin \
+ quay.io/keycloak/keycloak:25.0.6 start-dev
+• Open http://localhost:8180 -> Administration Console (admin / admin).
+• Create a realm named demo-realm. Its issuer is then http://localhost:8180/realms/demo-realm.
+• Client scopes -> create two scopes named read and write (Type: Default, Include in token scope: ON).
+• Clients -> Create client: Client ID postman-client; Client authentication: ON; tick Service accounts
+roles (this enables the client credentials grant). Save.
+• In the client's Client scopes tab, add read and write. In the Credentials tab, copy the Client secret.
+• Optional: Realm settings -> Tokens -> set Access Token Lifespan to 1 minute, to demonstrate an
+expired token.
+Postman token request:
+POST http://localhost:8180/realms/demo-realm/protocol/openid-connect/token
+Body (x-www-form-urlencoded):
+ grant_type = client_credentials
+ client_id = postman-client
+ client_secret = <secret copied from Credentials tab>
+ scope = read write
+Response: { "access_token": "eyJhbGciOi...", "expires_in": 300, "token_type": "Bearer", ... }
+Copy the access_token value. Decode it at jwt.io to confirm it contains "scope": "read write" and
+the correct iss.
+Step 4 (Option B): No Authorization Server available? Local test-token generator
+For a lab machine without Docker, run the app with the dev profile. It signs test JWTs with a temporary
+RSA key created at startup and validates them with the matching public key. Development use only:
+never deploy this, because anyone can mint tokens.
+package com.example.jwtdemo.config;
+import com.nimbusds.jose.jwk.JWK;
+import com.nimbusds.jose.jwk.JWKSet;
+import com.nimbusds.jose.jwk.RSAKey;
+import com.nimbusds.jose.jwk.source.ImmutableJWKSet;
+import java.security.KeyPair;
+import java.security.KeyPairGenerator;
+import java.security.interfaces.RSAPublicKey;
+import org.springframework.context.annotation.Bean;
+import org.springframework.context.annotation.Configuration;
+import org.springframework.context.annotation.Profile;
+import org.springframework.security.oauth2.jwt.JwtDecoder;
+import org.springframework.security.oauth2.jwt.JwtEncoder;
+import org.springframework.security.oauth2.jwt.NimbusJwtDecoder;
+import org.springframework.security.oauth2.jwt.NimbusJwtEncoder;
+@Configuration
+@Profile("dev")
+public class DevJwtConfig {
+ private final KeyPair keyPair = generateKeyPair();
+ @Bean // validates tokens (replaces the issuer-uri based decoder)
+Practical No. 18 - OAuth2 Resource Server with JWT Page 6
+ public JwtDecoder jwtDecoder() {
+ return NimbusJwtDecoder.withPublicKey((RSAPublicKey) keyPair.getPublic()).build();
+ }
+ @Bean // signs tokens
+ public JwtEncoder jwtEncoder() {
+ JWK jwk = new RSAKey.Builder((RSAPublicKey) keyPair.getPublic())
+ .privateKey(keyPair.getPrivate())
+ .keyID("dev-key")
+ .build();
+ return new NimbusJwtEncoder(new ImmutableJWKSet<>(new JWKSet(jwk)));
+ }
+ private static KeyPair generateKeyPair() {
+ try {
+ KeyPairGenerator generator = KeyPairGenerator.getInstance("RSA");
+ generator.initialize(2048);
+ return generator.generateKeyPair();
+ } catch (Exception e) {
+ throw new IllegalStateException(e);
+ }
+ }
+}
+package com.example.jwtdemo.controller;
+import java.time.Instant;
+import java.time.temporal.ChronoUnit;
+import java.util.Map;
+import org.springframework.context.annotation.Profile;
+import org.springframework.security.oauth2.jwt.JwtClaimsSet;
+import org.springframework.security.oauth2.jwt.JwtEncoder;
+import org.springframework.security.oauth2.jwt.JwtEncoderParameters;
+import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.RequestParam;
+import org.springframework.web.bind.annotation.RestController;
+@RestController
+@Profile("dev")
+public class DevTokenController {
+ private final JwtEncoder encoder;
+ public DevTokenController(JwtEncoder encoder) {
+ this.encoder = encoder;
+ }
+ // GET /dev/token?scope=read%20write&expired=false
+ @GetMapping("/dev/token")
+ public Map<String, String> token(@RequestParam(defaultValue = "read write") String scope,
+ @RequestParam(defaultValue = "false") boolean expired) {
+ Instant now = Instant.now();
+ Instant issuedAt = expired ? now.minus(2, ChronoUnit.HOURS) : now;
+ Instant expiresAt = expired ? now.minus(1, ChronoUnit.HOURS)
+ : now.plus(1, ChronoUnit.HOURS);
+ JwtClaimsSet claims = JwtClaimsSet.builder()
+ .issuer("http://localhost:8080")
+ .subject("student")
+ .issuedAt(issuedAt)
+ .expiresAt(expiresAt)
+ .claim("scope", scope) // becomes SCOPE_read, SCOPE_write
+ .build();
+ String jwt = encoder.encode(JwtEncoderParameters.from(claims)).getTokenValue();
+ return Map.of("access_token", jwt, "token_type", "Bearer");
+ }
+}
+mvn clean spring-boot:run -Dspring-boot.run.profiles=dev
+GET http://localhost:8080/dev/token -> valid token, scope "read write"
+GET http://localhost:8080/dev/token?scope=read -> valid token, read-only
+GET http://localhost:8080/dev/token?expired=true -> expired token (for the 401 test)
+Practical No. 18 - OAuth2 Resource Server with JWT Page 7
+Run the Application (Option A)
+# Keycloak must be running first (see above)
+cd jwt-resource-server-demo
+mvn clean spring-boot:run # Spring Boot on http://localhost:8080
+Step 7: Postman API Testing
+Attach the token in Postman: Authorization tab -> Type: Bearer Token -> paste the access_token (this
+sends the header Authorization: Bearer <token>). For POST/PUT set Body -> raw -> JSON.
+Invalid token test: change a few characters in the middle of a valid token, or use an expired token.
+# Method Endpoint Header / Body Expected Response
+1 GET /api/secure/data No Authorization header 401 Unauthorized
+2 GET /api/secure/data Bearer valid token (scope read) 200 OK - protected data
+3 GET /api/secure/data Bearer invalid / expired token 401 Unauthorized -
+invalid_token
+4 POST /api/secure/data No Authorization header 401 Unauthorized
+5 POST /api/secure/data Bearer valid token (scope write) +
+{"text":"New note"}
+201 Created
+6 POST /api/secure/data Bearer invalid / expired token 401 Unauthorized -
+invalid_token
+7 PUT /api/secure/data/1 No Authorization header 401 Unauthorized
+8 PUT /api/secure/data/1 Bearer valid token (scope write) +
+{"text":"Updated note"}
+200 OK
+9 PUT /api/secure/data/1 Bearer invalid / expired token 401 Unauthorized -
+invalid_token
+10 DELETE /api/secure/data/1 No Authorization header 401 Unauthorized
+11 DELETE /api/secure/data/1 Bearer invalid / expired token 401 Unauthorized -
+invalid_token
+12 DELETE /api/secure/data/1 Bearer valid token (scope write) 204 No Content
+13 POST / PUT
+/ DELETE
+/api/secure/data[/1] Bearer valid token with only scope read 403 Forbidden -
+insufficient_scope
+Check the response Headers tab for a failed call: the server returns WWW-Authenticate: Bearer
+error="invalid_token", error_description="...". Run row 12 (DELETE) last so that note 1
+still exists for the earlier tests.
+Sample cURL Commands (optional cross-check)
+TOKEN=eyJhbGciOi... # paste the access_token
+curl -i http://localhost:8080/api/secure/data # 401
+curl -i -H "Authorization: Bearer $TOKEN" http://localhost:8080/api/secure/data # 200
+curl -i -H "Authorization: Bearer abc.def.ghi" http://localhost:8080/api/secure/data # 401
+curl -i -H "Authorization: Bearer $TOKEN" -X POST http://localhost:8080/api/secure/data \
+ -H "Content-Type: application/json" -d '{"text":"New note"}' # 201
+curl -i -H "Authorization: Bearer $TOKEN" -X DELETE http://localhost:8080/api/secure/data/1 # 204
+Key Points to Remember
+• Resource server vs authorization server: this app never sees a username or password. It only
+checks the token's signature (using the public keys from the issuer), issuer, and expiry.
+• 401 vs 403: no token or an invalid/expired token gives 401 (invalid_token); a valid token that lacks the
+required scope gives 403 (insufficient_scope).
+Practical No. 18 - OAuth2 Resource Server with JWT Page 8
+• Scopes to authorities: Spring reads the scope claim and prefixes each value with SCOPE_, so scope
+read is checked with hasAuthority('SCOPE_read').
+• Stateless and no CSRF: the token is sent on every request, so no session is created and CSRF
+protection is disabled.
+• Deprecation note: the no-argument oauth2.jwt() is deprecated in Spring Security 6; use
+oauth2.jwt(Customizer.withDefaults()) as shown.
+• issuer-uri vs jwk-set-uri: issuer-uri also validates the iss claim and discovers the key URL
+automatically; jwk-set-uri only supplies the keys.
+• Always use HTTPS in production; a Bearer token is a credential and anyone holding it can use it until
+it expires.
+Conclusion
+The Spring Boot application was secured as an OAuth2 Resource Server. Every /api/secure/** request
+must carry a valid JWT Bearer token: missing or invalid tokens are rejected with 401, tokens without the
+required scope with 403, and valid tokens with the right scope can read, create, update and delete Notes
+in H2.
